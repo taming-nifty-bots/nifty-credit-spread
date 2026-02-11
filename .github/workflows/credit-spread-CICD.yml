@@ -61,7 +61,7 @@ jobs:
         uses: azure/CLI@v1
         with:
           inlineScript: |
-            running_jobs=$(az containerapp job execution list --name ${{ secrets.NIFTY_CS_SIGNAL_IMAGE_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }} --query "[?properties.status=='Running']")
+            running_jobs=$(az containerapp job execution list --name ${{ secrets.CREDIT_SPREAD_SIGNAL_JOB_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }} --query "[?properties.status=='Running']")
             if [ "$running_jobs" != "[]" ]; then
               az containerapp job stop -n ${{ secrets.CREDIT_SPREAD_SIGNAL_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
               az containerapp job start -n ${{ secrets.CREDIT_SPREAD_SIGNAL_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
