@@ -9,7 +9,6 @@ import pandas as pd
 pd.set_option('display.max_rows', None)
 import time
 import sys
-import os
 from retry import retry
 from slack_sdk import WebClient
 from pymongo import MongoClient

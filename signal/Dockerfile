@@ -19,4 +19,4 @@ WORKDIR /app
 RUN pip install -r src/requirements.txt
 
 # Run the script
-CMD python src/signal.py
+CMD python src/credit_spread_signal.py

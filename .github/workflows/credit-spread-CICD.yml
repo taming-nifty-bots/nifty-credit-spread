@@ -9,7 +9,6 @@ on:
 env:
   NIFTY_CS_IMAGE_NAME: nifty-credit-spread:${{ github.run_number }}   # Change as needed
   NIFTY_CS_SIGNAL_IMAGE_NAME: nifty-credit-spread-signal:${{ github.run_number }}   # Change as needed
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -40,40 +39,40 @@ jobs:
           docker push ${{ secrets.ACR_NAME }}.azurecr.io/${{ env.NIFTY_CS_IMAGE_NAME }}
           docker push ${{ secrets.ACR_NAME }}.azurecr.io/${{ env.NIFTY_CS_SIGNAL_IMAGE_NAME }}
 
-      # - name: Deploy to Nifty Credit Spread Job
-      #   uses: azure/CLI@v1
-      #   with:
-      #     inlineScript: |
-      #       az containerapp job update \
-      #         --name ${{ secrets.OPTION_BUY_JOB_NAME }} \
-      #         --resource-group ${{ secrets.RESOURCE_GROUP }} \
-      #         --image ${{ secrets.ACR_NAME }}.azurecr.io/${{ env.NIFTY_IMAGE_NAME }}
+      - name: Deploy to Nifty Credit Spread Job
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az containerapp job update \
+              --name ${{ secrets.CREDIT_SPREAD_JOB_NAME }} \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_NAME }}.azurecr.io/${{ env.NIFTY_CS_IMAGE_NAME }}
 
-      # - name: Deploy to Nifty Credit Spread Signal Job
-      #   uses: azure/CLI@v1
-      #   with:
-      #     inlineScript: |
-      #       az containerapp job update \
-      #         --name ${{ secrets.SIGNAL_JOB_NAME }} \
-      #         --resource-group ${{ secrets.RESOURCE_GROUP }} \
-      #         --image ${{ secrets.ACR_NAME }}.azurecr.io/${{ env.STRADDLE_IMAGE_NAME }}
+      - name: Deploy to Nifty Credit Spread Signal Job
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az containerapp job update \
+              --name ${{ secrets.CREDIT_SPREAD_SIGNAL_JOB_NAME }} \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_NAME }}.azurecr.io/${{ env.NIFTY_CS_SIGNAL_IMAGE_NAME }}
 
-      # - name: Restart running Nifty Credit Spread Signal Job
-      #   uses: azure/CLI@v1
-      #   with:
-      #     inlineScript: |
-      #       running_jobs=$(az containerapp job execution list --name ${{ secrets.SIGNAL_JOB_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }} --query "[?properties.status=='Running']")
-      #       if [ "$running_jobs" != "[]" ]; then
-      #         az containerapp job stop -n ${{ secrets.SIGNAL_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
-      #         az containerapp job start -n ${{ secrets.SIGNAL_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
-      #       fi
+      - name: Restart running Nifty Credit Spread Signal Job
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            running_jobs=$(az containerapp job execution list --name ${{ secrets.NIFTY_CS_SIGNAL_IMAGE_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }} --query "[?properties.status=='Running']")
+            if [ "$running_jobs" != "[]" ]; then
+              az containerapp job stop -n ${{ secrets.CREDIT_SPREAD_SIGNAL_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
+              az containerapp job start -n ${{ secrets.CREDIT_SPREAD_SIGNAL_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
+            fi
 
-      # - name: Restart running Nifty Credit Spread Job
-      #   uses: azure/CLI@v1
-      #   with:
-      #     inlineScript: |
-      #       running_jobs=$(az containerapp job execution list --name ${{ secrets.OPTION_BUY_JOB_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }} --query "[?properties.status=='Running']")
-      #       if [ "$running_jobs" != "[]" ]; then
-      #         az containerapp job stop -n ${{ secrets.OPTION_BUY_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
-      #         az containerapp job start -n ${{ secrets.OPTION_BUY_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
-      #       fi
+      - name: Restart running Nifty Credit Spread Job
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            running_jobs=$(az containerapp job execution list --name ${{ secrets.CREDIT_SPREAD_JOB_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }} --query "[?properties.status=='Running']")
+            if [ "$running_jobs" != "[]" ]; then
+              az containerapp job stop -n ${{ secrets.CREDIT_SPREAD_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
+              az containerapp job start -n ${{ secrets.CREDIT_SPREAD_JOB_NAME }} -g ${{ secrets.RESOURCE_GROUP }}
+            fi
