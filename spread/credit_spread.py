@@ -461,8 +461,8 @@ def main():
                             time.sleep(60)
                             break
 
-                        if  pnl > 0.9 * strategy['total_credit_received']:
-                            util.notify("90% premium decayed! Closing positions",slack_client=slack_client)
+                        if  pnl > 0.85 * strategy['total_credit_received']:
+                            util.notify("85% premium decayed! Closing positions",slack_client=slack_client)
                             close_active_positions()
                             time.sleep(60)
                             break
