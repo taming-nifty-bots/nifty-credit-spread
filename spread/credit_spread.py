@@ -275,7 +275,7 @@ def get_option_symbol(strike=19950, option_type = "PE" ):
     # Get the current date
     current_date = datetime.datetime.now()
     # Calculate the start and end dates of the current week
-    df= df[df['EXPIRY'] > (current_date + timedelta(days=6))]
+    df= df[df['EXPIRY'] > (current_date + timedelta(days=3))]
     df = df.head(1)
     print("Getting options Symbol...")
     print(f"Symbol: {df['TRADINGSYM'].values[0]} , Expiry: {df['EXPIRY'].values[0]}")
