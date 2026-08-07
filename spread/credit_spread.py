@@ -47,67 +47,50 @@ mongo_client = MongoClient(CONNECTION_STRING)
 
 strategies_collection_name = instrument_name.lower() + "_weekly" + "_" + user_name
 orders_collection_name = "orders_" + instrument_name.lower() +"_weekly" + "_" + user_name
-
+mongo_doc_id = instrument_name + "_Renko"
 # trades collection
 strategies = mongo_client['Bots'][strategies_collection_name]
 orders = mongo_client['Bots'][orders_collection_name]  # orders collection
+supertrend_collection = mongo_client['Bots']["supertrend"]
 
 
-def get_supertrend_direction():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"{instrument_name} Trend: {supertrend['signal']}")
-    return supertrend["signal"]
-
-def get_prev_supertrend_direction():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"{instrument_name} Trend: {supertrend['prev_signal']}")
-    return supertrend["prev_signal"]
-
-def get_coloumn_color():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"{instrument_name} Coloumn Color: {supertrend['color']}")
-    return supertrend["color"]
-
-
-
-def get_xo_zone():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"{instrument_name} xo_zone: {supertrend['xo_zone']}")
-    return supertrend["xo_zone"]
-
-
-# @retry(tries=5, delay=5, backoff=2)
-def get_supertrend_value():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"Super Trend Value: {supertrend['value']}")
-    return supertrend["value"]
-
-
-# @retry(tries=5, delay=5, backoff=2)
 def get_instrument_close():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
     print(f"{instrument_name} Close: {supertrend['close']}")
     return supertrend['close']
 
+def get_high40():
+    #
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+    print(f"{instrument_name} High of last 40 Bricks: {supertrend['last40_high']}")
+    return supertrend['last40_high']
 
-# @retry(tries=5, delay=5, backoff=2)
-def get_DTB():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"{instrument_name} DTB: {supertrend['double_top_buy']}")
-    return supertrend['double_top_buy']
+def get_low40():
+    #
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+    print(f"{instrument_name} Low of last 40 bricks: {supertrend['last40_low']}")
+    return supertrend['last40_low']
 
-def get_DBS():
-    supertrend_collection = mongo_client['Bots']["supertrend"]
-    supertrend = supertrend_collection.find_one({"_id": instrument_name})
-    print(f"{instrument_name} DBS: {supertrend['double_bottom_sell']}")
-    return supertrend['double_bottom_sell']
+@retry(tries=5, delay=5, backoff=2)
+def get_close_time():
+    #
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+    print(f"{instrument_name} Last Brick Close time: {supertrend['datetime']}")
+    return supertrend['datetime']
+
+
+@retry(tries=5, delay=5, backoff=2)
+def get_last_exit_time():
+    #
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+    print(f"{instrument_name} Last Brick Close time: {supertrend['lastexittime']}")
+    return supertrend['lastexittime']
+
+@retry(tries=5, delay=5, backoff=2)
+def update_last_exit_time():
+    #
+    supertrend_collection.update_one({"_id": mongo_doc_id}, {"$set": {"lastexittime": get_close_time()}})
+    return
 
 # @retry(tries=5, delay=5, backoff=2)
 def place_buy_order(symbol, qty):
@@ -239,7 +222,7 @@ def get_order_by_order_id(conn: edge.ConnectToIntegrate, order_id):
 
 # @retry(tries=5, delay=5, backoff=2)
 def get_st_strike():
-    return util.round_to_nearest(x=get_supertrend_value(), base=100)
+    return util.round_to_nearest(x=get_instrument_close(), base=100)
 
 
 
@@ -285,15 +268,12 @@ def get_option_symbol(strike=19950, option_type = "PE" ):
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def create_bull_put_spread():
+def create_bear_put_spread():
     option_type = "PE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm + util.round_to_nearest(x=0.0075 * atm, base=100)
-    if instrument_name == "NIFTY":
-        buy_strike = sell_strike - 400
-    elif instrument_name == "BANKNIFTY":
-        buy_strike = sell_strike - 500
+    sell_strike = atm - 400
+    buy_strike = atm - 100
     util.notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
     sell_strike_symbol, expiry = get_option_symbol(sell_strike, option_type)
     buy_strike_symbol, expiry = get_option_symbol(buy_strike, option_type)
@@ -306,8 +286,8 @@ def create_bull_put_spread():
          sell_order = place_sell_order(sell_strike_symbol, quantity)
     short_option_cost = sell_order['average_traded_price']
     long_option_cost = buy_order['average_traded_price']
-    util.notify("created bull put spread!",slack_client=slack_client)
-    record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost)
+    util.notify("created bear put spread!",slack_client=slack_client)
+    record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 
 
@@ -330,9 +310,9 @@ def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instru
     'long_option_symbol' : buy_strike_symbol,
     'short_option_cost' : short_option_cost,
     'long_option_cost' : long_option_cost,
-    'total_credit_received' : round((short_option_cost - long_option_cost) * int(quantity),2),
-    'stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
-    'trailing_stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
+    'total_debit_paid' : round((long_option_cost - short_option_cost) * int(quantity),2),
+    # 'stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
+    # 'trailing_stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
     'entry_time' : datetime.datetime.now().strftime('%H:%M'),
     'exit_time' : '',
     'instrument_close' : round(instrument_close,2),
@@ -347,16 +327,13 @@ def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instru
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def create_bear_call_spread():
+def create_bull_call_spread():
     option_type = "CE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm - util.round_to_nearest(x=0.0075 * atm, base=100)
-    if instrument_name == "NIFTY":
-        buy_strike = sell_strike + 400
-    elif instrument_name == "BANKNIFTY":
-        buy_strike = sell_strike + 500
-    util.notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
+    sell_strike = atm + 400
+    buy_strike = atm + 100
+    util.notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
     sell_strike_symbol, expiry = get_option_symbol(sell_strike, option_type)
     buy_strike_symbol, expiry = get_option_symbol(buy_strike, option_type)
     print(expiry)
@@ -368,8 +345,8 @@ def create_bear_call_spread():
         sell_order = place_sell_order(sell_strike_symbol, quantity)
     short_option_cost = sell_order['average_traded_price']
     long_option_cost = buy_order['average_traded_price']
-    util.notify("created bear call spread!",slack_client=slack_client)
-    record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost)
+    util.notify("created bull call spread!",slack_client=slack_client)
+    record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 def calculate_pnl(quantity, long_entry, long_exit, short_entry, short_exit):
     pnl = float(quantity) * ((float(short_entry) - float(short_exit)) + (float(long_exit) - float(long_entry)))
@@ -386,6 +363,7 @@ def close_active_positions():
         if buy_order['order_status'] == "COMPLETE":
             sell_order = place_sell_order(strategy['long_option_symbol'], strategy['quantity'])
             util.notify("Long option leg closed",slack_client=slack_client)
+            update_last_exit_time()
             strategies.update_one({'_id': strategy['_id']}, {'$set': {'strategy_state': 'closed'}})
             strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_date': str(datetime.datetime.now().date())}})
             strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_time': datetime.datetime.now().strftime('%H:%M')}})
@@ -413,8 +391,6 @@ def get_pnl(strategy, start=None):
 def main():
     util.notify(f"{instrument_name} Positional bot kicked off",slack_client=slack_client)
     print(f"{instrument_name} Positional bot kicked off")
-    util.notify(f"Supertrend Direction: {get_supertrend_direction()}", slack_client=slack_client)
-    util.notify(f"Supertrend Value: {get_supertrend_value()}", slack_client=slack_client)
     days_ago = datetime.datetime.now() - timedelta(days=7)
     start = days_ago.replace(hour=9, minute=15, second=0, microsecond=0)
     
@@ -429,8 +405,8 @@ def main():
             elapsed_time = notification_time - last_notification_time
             print(f"elapsed time: {elapsed_time}")
             if elapsed_time >= timedelta(hours=1):
-                util.notify(message=f"{instrument_name} Weekly option Selling bot is Alive!", slack_client=slack_client)
-                util.notify(message=f"current time from {instrument_name}WeeklyOptionSelling: {current_time}", slack_client=slack_client)
+                util.notify(message=f"{instrument_name} Weekly Debit Spread bot is Alive!", slack_client=slack_client)
+                util.notify(message=f"current time from {instrument_name} Debit Spread: {current_time}", slack_client=slack_client)
                 # Update the last notification time
                 last_notification_time = notification_time
                 
@@ -444,39 +420,33 @@ def main():
                         pnl = get_pnl(strategy, start)
                         if strategy['max_pnl_reached'] < pnl:
                             strategies.update_one({'_id': strategy['_id']}, {'$set': {'max_pnl_reached': pnl}})
-                            strategies.update_one({'_id': strategy['_id']}, {'$set': {'trailing_stop_loss': strategy['stop_loss'] + pnl}})
+                            #strategies.update_one({'_id': strategy['_id']}, {'$set': {'trailing_stop_loss': strategy['stop_loss'] + pnl}})
 
                         if strategy['min_pnl_reached'] > pnl:
                             strategies.update_one({'_id': strategy['_id']}, {'$set': {'min_pnl_reached': pnl}})
                         
-                        if pnl <= strategy['trailing_stop_loss']:
-                            util.notify(f"SL HIT! Current PnL: {pnl}",slack_client=slack_client, slack_channel=slack_channel)
-                            close_active_positions()
-                            time.sleep(60)
-                            break
+                        # if pnl <= strategy['trailing_stop_loss']:
+                        #     util.notify(f"SL HIT! Current PnL: {pnl}",slack_client=slack_client, slack_channel=slack_channel)
+                        #     close_active_positions()
+                        #     time.sleep(60)
+                        #     break
 
-                        if strategy['trend'] != get_supertrend_direction():
-                            util.notify(f"Supertrend Direction Changed to {get_supertrend_direction()}",slack_client=slack_client)
-                            close_active_positions()
-                            time.sleep(60)
-                            break
-
-                        if  pnl > 0.85 * strategy['total_credit_received']:
-                            util.notify("85% premium decayed! Closing positions",slack_client=slack_client)
+                        if (strategy['trend'] == 'Bullish' and get_instrument_close() < get_low40()) or (strategy['trend'] == 'Bearish' and get_instrument_close() > get_high40()):
+                            util.notify(f"Donchian Trend Changed",slack_client=slack_client)
                             close_active_positions()
                             time.sleep(60)
                             break
 
                         print(str(datetime.datetime.now().date()))
                         if current_time > datetime.time(hour=11, minute=45) and strategy['expiry'] == str(datetime.datetime.now().date()):
-                            util.notify("Rolling over positions to next expiry",slack_client=slack_client)
+                            util.notify("Closing positions on Expiry",slack_client=slack_client)
                             close_active_positions()
                             break
                 else:
-                    if get_supertrend_direction() == 'Bullish' and get_prev_supertrend_direction() == 'Bullish' and get_coloumn_color() == "green" and get_DTB() == True and get_instrument_close() < (get_supertrend_value() + (.0125 * get_supertrend_value())):
-                        create_bull_put_spread()
-                    elif get_supertrend_direction() == 'Bearish' and get_prev_supertrend_direction() == 'Bearish' and get_coloumn_color() == "red" and get_DBS() == True and get_instrument_close() > (get_supertrend_value() - (.0125 * get_supertrend_value())):
-                        create_bear_call_spread()
+                    if get_instrument_close() > get_high40() and get_close_time() > get_last_exit_time():
+                        create_bull_call_spread()
+                    elif get_instrument_close() < get_low40() and get_close_time() > get_last_exit_time():
+                        create_bear_put_spread()
                     else:
                         print("waiting for a Pullback to create new positions!")
         except Exception as e:
