@@ -87,7 +87,7 @@ def main():
                 conn = edge.login_to_integrate()
                 initial_high, initial_low, initial_color = get_high_low(instrument)
 
-                df = ta.pnf(conn, exchange, trading_symbol, start, end, 'min', brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color)
+                df = ta.renko(conn = conn, exchange = 'NSE', trading_symbol = trading_symbol, start=start, end=datetime.today(), brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color, initial_datetime=days_ago)
                 
                 print("\n***** Fetched 1 min PnF Data *****\n")
                 # st2 = ta.supertrend(df.copy(),10, 2)
