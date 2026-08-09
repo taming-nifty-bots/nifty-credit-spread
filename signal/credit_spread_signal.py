@@ -37,13 +37,19 @@ collection_name = "supertrend"
 supertrend_collection = mongo_client['Bots'][collection_name]
 instrument_name = ["NIFTY"]
 
+# credit_spread.py reads `instrument_name + "_Renko"`. The signal must write the
+# same document, otherwise the executor never sees these bricks.
+def renko_doc_id(instrument):
+    return instrument + "_Renko"
+
+
 def get_supertrend_start_date(instrument):
-    supertrend = supertrend_collection.find_one({"_id": instrument})
+    supertrend = supertrend_collection.find_one({"_id": renko_doc_id(instrument)})
     return supertrend["start_date"]
 
 
 def get_high_low(instrument):
-    supertrend = supertrend_collection.find_one({"_id": instrument})
+    supertrend = supertrend_collection.find_one({"_id": renko_doc_id(instrument)})
     return supertrend["initial_high"], supertrend["initial_low"], supertrend["initial_color"]
 
 #@retry(tries=5, delay=5, backoff=2)
@@ -88,33 +94,46 @@ def main():
                 initial_high, initial_low, initial_color = get_high_low(instrument)
 
                 df = ta.renko(conn = conn, exchange = 'NSE', trading_symbol = trading_symbol, start=start, end=datetime.today(), brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color, initial_datetime=days_ago)
-                
-                print("\n***** Fetched 1 min PnF Data *****\n")
-                # st2 = ta.supertrend(df.copy(),10, 2)
-                # print(st2.iloc[-20:])
-                df = ta.supertrend(df, 10, 3.5)
-                df = ta.xo_zone(df, 4)
-                df = ta.rsi_avg(df, 14)
-                print(df.iloc[-20:])
-                # print(st2.iloc[-20:])
 
-                if supertrend_collection.count_documents({"_id": instrument}) == 0:
-                    st = {"_id": instrument, "datetime": df.iloc[-1]['datetime'], "value": df.iloc[-1]['ST'], "signal": df.iloc[-1]['signal'], "color":df.iloc[-1]['color'], "xo_zone":df.iloc[-1]['xo_zone'], "rsi": df.iloc[-1]['rsi'], "double_top_buy":bool(df.iloc[-1]['double_top_buy']), "double_bottom_sell":bool(df.iloc[-1]['double_bottom_sell']), "prev_signal": df.iloc[-2]['signal']}
+                print("\n***** Fetched 0.05% Renko Data *****\n")
+                print(df.iloc[-20:])
+
+                # Previous 40 bricks only. The iloc stop is exclusive, so -1 (the
+                # newest brick, the one that breaks out) is deliberately omitted -
+                # including it would make the breakout brick its own extreme and the
+                # condition would never fire cleanly in a trend.
+                high40 = df.iloc[-41:-1]['high'].max()
+                low40 = df.iloc[-41:-1]['low'].min()
+                df = ta.rsi(df, period=40)
+                print(f"40 brick High: {high40}, Low: {low40}, RSI: {df.iloc[-1]['rsi']}")
+
+                doc_id = renko_doc_id(instrument)
+                if supertrend_collection.count_documents({"_id": doc_id}) == 0:
+                    st = {"_id": doc_id, "datetime": df.iloc[-1]['datetime'], "color": df.iloc[-1]['color'], "close": df.iloc[-1]['close'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "start_date": start, "chart": "renko"}
                     supertrend_collection.insert_one(st)
                 else:
-                    supertrend_collection.update_one({'_id': instrument}, {'$set': {"datetime": df.iloc[-1]['datetime'],
-                                "value": df.iloc[-1]['ST'], "close": df.iloc[-1]['close'], "signal": df.iloc[-1]['signal'], "color":df.iloc[-1]['color'], "xo_zone":df.iloc[-1]['xo_zone'], "rsi": df.iloc[-1]['rsi'], "double_top_buy":bool(df.iloc[-1]['double_top_buy']), "double_bottom_sell":bool(df.iloc[-1]['double_bottom_sell']), "prev_signal": df.iloc[-2]['signal']}})
+                    supertrend_collection.update_one({'_id': doc_id}, {'$set': {"datetime": df.iloc[-1]['datetime'],
+                                "close": df.iloc[-1]['close'], "color": df.iloc[-1]['color'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "chart": "renko"}})
             
             print("repeating loop for Supertrend")
         if current_time > trade_end_time:
             time.sleep(200)
-            # Extract the date of the first entry
-            df = ta.pnf(conn, exchange, trading_symbol, start, end, 'min', brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color)
-            first_day = df['datetime'].iloc[0].date()
+            # Reseed tomorrow's first brick from the SAME chart type used above.
+            # This previously called ta.pnf, which wrote Point & Figure seeds that
+            # were then fed into ta.renko the next morning.
+            df = ta.renko(conn = conn, exchange = 'NSE', trading_symbol = trading_symbol, start=start, end=datetime.today(), brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color, initial_datetime=days_ago)
+            print("\n***** Fetched 0.05% Renko Data (end of day reseed) *****\n")
+
+            # df.iloc[0] is the carried-over seed brick and still carries the OLD
+            # start date, so anchoring on it would freeze start_date permanently.
+            if df['datetime'].iloc[0].date() > days_ago.date():
+                first_day = df['datetime'].iloc[0].date()
+            else:
+                first_day = df['datetime'].iloc[1].date()
 
             # Filter the DataFrame to include only the entries from the first day
-            df_first_day = df[df['datetime'].dt.date == first_day]            
-            supertrend_collection.update_one({'_id': instrument}, {'$set': {"initial_color": df_first_day.iloc[-1]['color'], "initial_high": df_first_day.iloc[-1]['high'], "initial_low": df_first_day.iloc[-1]['low'], "start_date": df_first_day.iloc[0]['datetime']}})
+            df_first_day = df[df['datetime'].dt.date == first_day]
+            supertrend_collection.update_one({'_id': renko_doc_id(instrument)}, {'$set': {"initial_color": df_first_day.iloc[-1]['color'], "initial_high": df_first_day.iloc[-1]['high'], "initial_low": df_first_day.iloc[-1]['low'], "start_date": df_first_day.iloc[0]['datetime']}})
             return
         
         time.sleep(5)
