@@ -79,6 +79,17 @@ def get_close_time():
     return supertrend['datetime']
 
 
+# Camarilla H4/L4 - read from the signal doc and recorded on every entry. Gates nothing.
+def get_camarilla_context():
+    """Never raises: the orders are already filled by the time this runs."""
+    try:
+        supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+        return {k: supertrend[k] for k in ('cam_h4', 'cam_l4') if k in supertrend}
+    except Exception as e:
+        print(f"[camarilla] unavailable ({e}) - trade unaffected")
+        return {}
+
+
 @retry(tries=5, delay=5, backoff=2)
 def get_last_exit_time():
     #
@@ -322,6 +333,9 @@ def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instru
     'max_pnl_reached': 0,
     'min_pnl_reached': 0
     }
+    # Observational fields only - appended after the dict is built so they can
+    # never interfere with any value above.
+    strategy.update(get_camarilla_context())
     strategies.insert_one(strategy)
 
 

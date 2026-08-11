@@ -52,6 +52,27 @@ def get_high_low(instrument):
     supertrend = supertrend_collection.find_one({"_id": renko_doc_id(instrument)})
     return supertrend["initial_high"], supertrend["initial_low"], supertrend["initial_color"]
 
+
+# Camarilla H4/L4 - computed here and stored on the signal doc. Gates nothing.
+def camarilla_levels(conn, trading_symbol):
+    """Never raises: the signal loop must keep running even if this fails."""
+    try:
+        df = edge.fetch_historical_data(conn, 'NSE', trading_symbol,
+                                        datetime.now() - timedelta(days=20),
+                                        datetime.now(), 'day')
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        # Last session strictly before today: today's bar is still forming, and
+        # this skips weekends/holidays automatically.
+        prev = df[df['datetime'].dt.date < datetime.now().date()].iloc[-1]
+        close = round(float(prev['close']), 2)
+        rng = round(float(prev['high']) - float(prev['low']), 2)
+        return {"cam_h4": round(close + 0.55 * rng, 2),
+                "cam_l4": round(close - 0.55 * rng, 2)}
+    except Exception as e:
+        print(f"[camarilla] unavailable ({e}) - signal unaffected")
+        return {}
+
+
 #@retry(tries=5, delay=5, backoff=2)
 def main():
     print("Supertrend Started")
@@ -114,7 +135,14 @@ def main():
                 else:
                     supertrend_collection.update_one({'_id': doc_id}, {'$set': {"datetime": df.iloc[-1]['datetime'],
                                 "close": df.iloc[-1]['close'], "color": df.iloc[-1]['color'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "chart": "renko"}})
-            
+
+                # Camarilla H4/L4: written separately from the signal fields above
+                # so that a failure here can never disturb them.
+                cam = camarilla_levels(conn, trading_symbol)
+                if cam:
+                    print(f"Camarilla H4: {cam['cam_h4']}, L4: {cam['cam_l4']}")
+                    supertrend_collection.update_one({'_id': doc_id}, {'$set': cam})
+
             print("repeating loop for Supertrend")
         if current_time > trade_end_time:
             time.sleep(200)
