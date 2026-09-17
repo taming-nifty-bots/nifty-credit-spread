@@ -279,12 +279,12 @@ def get_option_symbol(strike=19950, option_type = "PE" ):
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def create_bear_put_spread():
-    option_type = "PE"
+def create_bear_call_spread():
+    option_type = "CE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm - 400
-    buy_strike = atm - 100
+    sell_strike = atm + 100
+    buy_strike = atm + 400
     util.notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
     sell_strike_symbol, expiry = get_option_symbol(sell_strike, option_type)
     buy_strike_symbol, expiry = get_option_symbol(buy_strike, option_type)
@@ -321,7 +321,7 @@ def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instru
     'long_option_symbol' : buy_strike_symbol,
     'short_option_cost' : short_option_cost,
     'long_option_cost' : long_option_cost,
-    'total_debit_paid' : round((long_option_cost - short_option_cost) * int(quantity),2),
+    'total_credit_received' : round((short_option_cost - long_option_cost) * int(quantity),2),
     # 'stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
     # 'trailing_stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
     'entry_time' : datetime.datetime.now().strftime('%H:%M'),
@@ -341,12 +341,12 @@ def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instru
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def create_bull_call_spread():
-    option_type = "CE"
+def create_bull_put_spread():
+    option_type = "PE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm + 400
-    buy_strike = atm + 100
+    sell_strike = atm - 100
+    buy_strike = atm - 400
     util.notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
     sell_strike_symbol, expiry = get_option_symbol(sell_strike, option_type)
     buy_strike_symbol, expiry = get_option_symbol(buy_strike, option_type)
@@ -419,8 +419,8 @@ def main():
             elapsed_time = notification_time - last_notification_time
             print(f"elapsed time: {elapsed_time}")
             if elapsed_time >= timedelta(hours=1):
-                util.notify(message=f"{instrument_name} Weekly Debit Spread bot is Alive!", slack_client=slack_client)
-                util.notify(message=f"current time from {instrument_name} Debit Spread: {current_time}", slack_client=slack_client)
+                util.notify(message=f"{instrument_name} Weekly Credit Spread bot is Alive!", slack_client=slack_client)
+                util.notify(message=f"current time from {instrument_name} Credit Spread: {current_time}", slack_client=slack_client)
                 # Update the last notification time
                 last_notification_time = notification_time
                 
@@ -458,11 +458,11 @@ def main():
                             break
                 else:
                     if get_instrument_close() > get_high40() and get_close_time() > get_last_exit_time():
-                        create_bull_call_spread()
+                        create_bull_put_spread()
                     elif get_instrument_close() < get_low40() and get_close_time() > get_last_exit_time():
-                        create_bear_put_spread()
+                        create_bear_call_spread()
                     else:
-                        print("waiting for a Pullback to create new positions!")
+                        print("waiting for a breakout to create new positions!")
         except Exception as e:
             util.notify(f"Exception occurred: {str(e)}", slack_client=slack_client, slack_channel=slack_channel)
         
