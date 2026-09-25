@@ -87,6 +87,11 @@ def safe_notify(message):
 def main():
     print("Supertrend Started")
     safe_notify("Nifty Supertrend bot has started!")
+    # Dhan whitelists exactly one static IP for order placement and it is locked for 7
+    # days once set, so every bot says which address it is actually going out from when
+    # it starts. This is how we confirm the Azure NAT Gateway is in the path, and how we
+    # find out straight away if the address ever changes underneath us.
+    safe_notify(f"Nifty Supertrend bot public IP: {util.get_public_ip()}")
     # Track the time when the last notification was sent
     last_notification_time = datetime.now()
 

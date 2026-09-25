@@ -368,6 +368,10 @@ def get_pnl(strategy, start=None):
 # @retry(tries=5, delay=5, backoff=2)
 def main():
     util.notify(f"{instrument_name} Positional bot kicked off",slack_client=slack_client)
+    # This is the bot that actually places orders, so the IP matters most here: Dhan
+    # whitelists exactly one static IP and rejects orders from anywhere else. Reporting
+    # it at startup means a mismatch shows up in Slack before a trade fails, not after.
+    util.notify(f"{instrument_name} Positional bot public IP: {util.get_public_ip()}",slack_client=slack_client)
     print(f"{instrument_name} Positional bot kicked off")
     days_ago = datetime.datetime.now() - timedelta(days=7)
     start = days_ago.replace(hour=9, minute=15, second=0, microsecond=0)
