@@ -1,14 +1,11 @@
 from pymongo import MongoClient
 import os
 import sys
-from tamingnifty import connect_definedge as edge
+from tamingnifty import connect_dhan as edge
 from tamingnifty import utils as util
-import requests
 import time
-import zipfile
 from retry import retry
-import io
-import datetime 
+import datetime
 from datetime import timedelta
 from dateutil import parser
 import pandas as pd
@@ -41,6 +38,12 @@ slack_client = WebClient(token=os.environ.get('slack_token'))
 quantity = os.environ.get('quantity')
 instrument_name = os.environ.get('instrument_name')
 lot_size = 65
+
+# Set live_trading=true in the .env only when you actually want real money orders
+# going to Dhan. Anything else - including the variable being missing entirely -
+# means orders are simulated, which is what forward testing runs on.
+live_trading = os.environ.get('live_trading', 'false').lower() == 'true'
+print(f"live_trading = {live_trading}")
 
 
 mongo_client = MongoClient(CONNECTION_STRING)
@@ -103,132 +106,86 @@ def update_last_exit_time():
     supertrend_collection.update_one({"_id": mongo_doc_id}, {"$set": {"lastexittime": get_close_time()}})
     return
 
-# @retry(tries=5, delay=5, backoff=2)
-def place_buy_order(symbol, qty):
-    # conn = edge.login_to_integrate(True)
-    # io = edge.IntegrateOrders(conn)
-    # order = io.place_order(
-    #     exchange=conn.EXCHANGE_TYPE_NFO,
-    #     order_type=conn.ORDER_TYPE_BUY,
-    #     price=0,
-    #     price_type=conn.PRICE_TYPE_MARKET,
-    #     product_type=conn.PRODUCT_TYPE_NORMAL,
-    #     quantity=qty,
-    #     tradingsymbol=symbol,
-    # )
+def check_quantity(qty):
+    """
+    Refuse anything above the exchange freeze limit.
 
-    # order_id = order['order_id']
-    # order = get_order_by_order_id(conn, order_id)
-    # print(f"Order Status: {order['order_status']}")
-    # if order['order_status'] != "COMPLETE":
-    #     time.sleep(2)
-    #     order = get_order_by_order_id(conn, order_id)
-    #     print(f"Order Status after retry: {order['order_status']}")
-    # if order['order_status'] != "COMPLETE":
-    #     util.notify(f"Order Message: {order['message']}",slack_client=slack_client)
-    #     util.notify(f"Order Failed: {order}",slack_client=slack_client)
-    #     orders.insert_one(order)
-    #     raise Exception("Error in placing order - " +
-    #                 str(order['message']))
-    
-    ############################Temp Code for testing purpose only########################
-    ######################################################################################
-    order = {
-        "order_id": "25052900010716",
-        "last_fill_qty": qty,
-        "tradingsymbol": symbol,
-        "token": "40470",
-        "quantity": qty,
-        "price_type": "MARKET",
-        "product_type": "NORMAL",
-        "order_entry_time": datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
-        "order_status": "COMPLETE",
-        "order_type": "BUY",
-        "exchange_orderid": "1100000127824637",
-        "message": " ",
-        "pending_qty": "0",
-        "price": "0.00",
-        "exchange_time": "29-05-2025 13:08:22",
-        "average_traded_price": edge.get_option_price('NFO', symbol, (datetime.datetime.now() - timedelta(days=7)), datetime.datetime.today(), 'min'),
-        "exchange": "NFO",
-        "filled_qty": qty,
-        "disclosed_quantity": "0",
+    This runs before the FIRST leg is sent, not after. A spread where one leg is
+    accepted and the other is rejected for being too large would leave a naked short
+    option running, which is the worst thing this bot could possibly do.
+    """
+    if int(qty) > edge.NIFTY_FREEZE_QTY:
+        message = (f"Quantity {qty} is above the exchange freeze limit of "
+                   f"{edge.NIFTY_FREEZE_QTY}. No order was placed.")
+        util.notify(message, slack_client=slack_client)
+        raise Exception(message)
+
+
+def simulated_order(conn, symbol, security_id, qty, transaction_type):
+    """
+    Build an order dict that looks exactly like a real Dhan order, but without
+    sending anything to the broker. The fill price is the close of the most recent
+    1 minute candle, which is what the Definedge version did as well.
+
+    This is what runs during forward testing, i.e. whenever live_trading is false.
+    """
+    start = datetime.datetime.now() - timedelta(days=7)
+    price = edge.get_option_price(conn, security_id, start, datetime.datetime.today(), 'min')
+    return {
+        "orderId": "SIMULATED",
+        "orderStatus": "TRADED",
+        "transactionType": transaction_type,
+        "exchangeSegment": "NSE_FNO",
+        "productType": "MARGIN",
+        "orderType": "MARKET",
         "validity": "DAY",
-        "ordersource": "TRTP"
+        "tradingSymbol": symbol,
+        "securityId": str(security_id),
+        "quantity": int(qty),
+        "filledQty": int(qty),
+        "averageTradedPrice": price,
+        "createTime": datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+        "simulated": True,
     }
-    ############################Temp Code for testing purpose ENDS HERE########################
-    ######################################################################################
+
+
+def submit_order(symbol, security_id, qty, transaction_type):
+    """
+    Place one leg of a spread and return the final Dhan order dict.
+
+    The keys here are Dhan's own, not Definedge's: the status field is orderStatus
+    and a successful fill is "TRADED" (Definedge called it "COMPLETE"), and the fill
+    price is averageTradedPrice.
+
+    The caller MUST check orderStatus == "TRADED" before reading averageTradedPrice.
+    A rejected order has no fill price.
+    """
+    check_quantity(qty)
+    conn = edge.login_to_dhan()
+
+    if live_trading == True:
+        response = edge.place_order(conn, security_id, transaction_type, int(qty))
+        print(f"Order accepted by Dhan: {response}")
+        # Dhan only tells us the order was accepted. Poll until it is actually
+        # filled (or rejected) so we know the real traded price.
+        order = edge.wait_for_fill(conn, response['orderId'])
+    else:
+        order = simulated_order(conn, symbol, security_id, qty, transaction_type)
+
     print(f"Order placed: {order}")
-    util.notify(f"Order placed: {order}",slack_client=slack_client)
+    util.notify(f"Order placed: {order}", slack_client=slack_client)
     orders.insert_one(order)
     return order
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def place_sell_order(symbol, qty):
-    # conn = edge.login_to_integrate(True)
-    # io = edge.IntegrateOrders(conn)
-    # order = io.place_order(
-    #     exchange=conn.EXCHANGE_TYPE_NFO,
-    #     order_type=conn.ORDER_TYPE_SELL,
-    #     price=0,
-    #     price_type=conn.PRICE_TYPE_MARKET,
-    #     product_type=conn.PRODUCT_TYPE_NORMAL,
-    #     quantity=qty,
-    #     tradingsymbol=symbol,
-    # )
-    # order_id = order['order_id']
-    # order = get_order_by_order_id(conn, order_id)
-    # print(f"Order Status: {order['order_status']}")
-    # if order['order_status'] != "COMPLETE":
-    #     time.sleep(2)
-    #     order = get_order_by_order_id(conn, order_id)
-    #     print(f"Order Status after retry: {order['order_status']}")
-    # if order['order_status'] != "COMPLETE":
-    #     util.notify(f"Order Message: {order['message']}",slack_client=slack_client)
-    #     util.notify(f"Order Failed: {order}",slack_client=slack_client)
-    #     orders.insert_one(order)
-    #     raise Exception("Error in placing order - " +
-    #                 str(order['message']))
-    ############################Temp Code for testing purpose only########################
-    ######################################################################################
-    order = {
-        "order_id": "25052900010716",
-        "last_fill_qty": qty,
-        "tradingsymbol": symbol,
-        "token": "40470",
-        "quantity": qty,
-        "price_type": "MARKET",
-        "product_type": "NORMAL",
-        "order_entry_time": datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
-        "order_status": "COMPLETE",
-        "order_type": "SELL",
-        "exchange_orderid": "1100000127824637",
-        "message": " ",
-        "pending_qty": "0",
-        "price": "0.00",
-        "exchange_time": "29-05-2025 13:08:22",
-        "average_traded_price": edge.get_option_price('NFO', symbol, (datetime.datetime.now() - timedelta(days=7)), datetime.datetime.today(), 'min'),
-        "exchange": "NFO",
-        "filled_qty": qty,
-        "disclosed_quantity": "0",
-        "validity": "DAY",
-        "ordersource": "TRTP"
-    }
-    ############################Temp Code for testing purpose ENDS HERE########################
-    ######################################################################################
-    util.notify(f"Order placed: {order}",slack_client=slack_client)
-    orders.insert_one(order)
-    return order
+def place_buy_order(symbol, security_id, qty):
+    return submit_order(symbol, security_id, qty, "BUY")
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def get_order_by_order_id(conn: edge.ConnectToIntegrate, order_id):
-    io = edge.IntegrateOrders(conn)
-    print(f"Getting order by order ID: {order_id}")
-    order = io.order(order_id)
-    print(order)
-    return order
+def place_sell_order(symbol, security_id, qty):
+    return submit_order(symbol, security_id, qty, "SELL")
 
 
 # @retry(tries=5, delay=5, backoff=2)
@@ -237,45 +194,11 @@ def get_st_strike():
 
 
 
-# @retry(tries=5, delay=5, backoff=2)
-def load_csv_from_zip(url='https://app.definedgesecurities.com/public/allmaster.zip'):
-    column_names = ['SEGMENT', 'TOKEN', 'SYMBOL', 'TRADINGSYM', 'INSTRUMENT TYPE', 'EXPIRY', 'TICKSIZE', 'LOTSIZE', 'OPTIONTYPE', 'STRIKE', 'PRICEPREC', 'MULTIPLIER', 'ISIN', 'PRICEMULT', 'UnKnown']
-    # Send a GET request to download the zip file
-    response = requests.get(url)
-    response.raise_for_status()  # This will raise an exception for HTTP errors
-    # Open the zip file from the bytes-like object
-    with zipfile.ZipFile(io.BytesIO(response.content)) as thezip:
-        # Extract the name of the first CSV file in the zip archive
-        csv_name = thezip.namelist()[0]
-        # Extract and read the CSV file into a pandas DataFrame
-        with thezip.open(csv_name) as csv_file:
-            df = pd.read_csv(csv_file, header=None, names=column_names, low_memory=False, on_bad_lines='skip')
-    df = df[(df['SEGMENT'] == 'NFO') & (df['INSTRUMENT TYPE'] == 'OPTIDX')]
-    df = df[(df['SYMBOL'].str.startswith(instrument_name))]
-    df = df[df['SYMBOL'] == instrument_name]
-    df['EXPIRY'] = df['EXPIRY'].astype(str).apply(lambda x: x.zfill(8))
-    df['EXPIRY'] = pd.to_datetime(df['EXPIRY'], format='%d%m%Y', errors='coerce')
-    df = df.sort_values(by='EXPIRY', ascending=True)
-    # Return the loaded DataFrame
-    return df
-
-
-
-# @retry(tries=5, delay=5, backoff=2)
-def get_option_symbol(strike=19950, option_type = "PE" ):
-    df = load_csv_from_zip()
-    df = df[df['TRADINGSYM'].str.contains(str(strike))]
-    df = df[df['OPTIONTYPE'].str.match(option_type)]
-    # Get the current date
-    current_date = datetime.datetime.now()
-    # Calculate the start and end dates of the current week
-    df= df[df['EXPIRY'] > (current_date + timedelta(days=3))]
-    df = df.head(1)
-    print("Getting options Symbol...")
-    print(f"Symbol: {df['TRADINGSYM'].values[0]} , Expiry: {df['EXPIRY'].values[0]}")
-    return df['TRADINGSYM'].values[0], df['EXPIRY'].values[0]
-
-
+# Option contract lookup now lives in the library, as edge.get_index_option_symbol().
+# It reads Dhan's scrip master CSV and returns the security id as well as the symbol,
+# because Dhan orders are placed against a numeric security id, not a symbol string.
+# The old load_csv_from_zip() / get_option_symbol() pair that read Definedge's
+# allmaster.zip has been removed.
 
 
 # @retry(tries=5, delay=5, backoff=2)
@@ -286,25 +209,37 @@ def create_bear_call_spread():
     sell_strike = atm + 100
     buy_strike = atm + 400
     util.notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
-    sell_strike_symbol, expiry = get_option_symbol(sell_strike, option_type)
-    buy_strike_symbol, expiry = get_option_symbol(buy_strike, option_type)
-    print(expiry)
-    expiry = str(expiry)
-    expiry = parser.parse(expiry).date()
-    print(expiry)
-    buy_order = place_buy_order(buy_strike_symbol, quantity)
-    if buy_order['order_status'] == "COMPLETE":
-         sell_order = place_sell_order(sell_strike_symbol, quantity)
-    short_option_cost = sell_order['average_traded_price']
-    long_option_cost = buy_order['average_traded_price']
-    util.notify("created bear put spread!",slack_client=slack_client)
-    record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name)
+    print(f"Expiry: {expiry}")
+
+    # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
+    # it to be the one that limits the loss, not the one that creates it.
+    buy_order = place_buy_order(buy_strike_symbol, buy_security_id, quantity)
+    if buy_order['orderStatus'] != "TRADED":
+        # Nothing is on the book, so it is safe to skip this entry and let the main
+        # loop try again on the next pass.
+        util.notify(f"Hedge leg not filled, no spread created: {buy_order}",slack_client=slack_client)
+        raise Exception("Buy leg not filled - " + str(buy_order))
+
+    sell_order = place_sell_order(sell_strike_symbol, sell_security_id, quantity)
+    if sell_order['orderStatus'] != "TRADED":
+        # The hedge IS filled but the short is not, so we are sitting on a long
+        # option that nothing is watching, and no Mongo document was written. Stop
+        # the bot: if we carried on looping it would place a second spread on top.
+        util.notify(f"SHORT LEG FAILED after the hedge filled. Long {buy_strike_symbol} is OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+        sys.exit(1)
+
+    short_option_cost = sell_order['averageTradedPrice']
+    long_option_cost = buy_order['averageTradedPrice']
+    util.notify("created bear call spread!",slack_client=slack_client)
+    record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instrument_close, expiry, short_option_cost, long_option_cost):
-    conn = edge.login_to_integrate()
+def record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, trend, instrument_close, expiry, short_option_cost, long_option_cost):
+    conn = edge.login_to_dhan()
     vix = edge.fetch_ltp(conn, 'NSE', 'India VIX')
     strategy = {
     'instrument_name': instrument_name,
@@ -318,7 +253,12 @@ def record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, trend, instru
     'exit_date': '',
     'trend' : trend,
     'short_option_symbol' : sell_strike_symbol,
+    # The security ids are what the exit orders and the running PnL are placed
+    # against. Without them stored here we would have to search the scrip master
+    # again on every exit, and Dhan has no way to trade a plain symbol string.
+    'short_option_security_id' : sell_security_id,
     'long_option_symbol' : buy_strike_symbol,
+    'long_option_security_id' : buy_security_id,
     'short_option_cost' : short_option_cost,
     'long_option_cost' : long_option_cost,
     'total_credit_received' : round((short_option_cost - long_option_cost) * int(quantity),2),
@@ -348,19 +288,31 @@ def create_bull_put_spread():
     sell_strike = atm - 100
     buy_strike = atm - 400
     util.notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
-    sell_strike_symbol, expiry = get_option_symbol(sell_strike, option_type)
-    buy_strike_symbol, expiry = get_option_symbol(buy_strike, option_type)
-    print(expiry)
-    expiry = str(expiry)
-    expiry = parser.parse(expiry).date()
-    print(expiry)
-    buy_order = place_buy_order(buy_strike_symbol, quantity)
-    if buy_order['order_status'] == "COMPLETE":
-        sell_order = place_sell_order(sell_strike_symbol, quantity)
-    short_option_cost = sell_order['average_traded_price']
-    long_option_cost = buy_order['average_traded_price']
-    util.notify("created bull call spread!",slack_client=slack_client)
-    record_details_in_mongo(sell_strike_symbol, buy_strike_symbol, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name)
+    print(f"Expiry: {expiry}")
+
+    # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
+    # it to be the one that limits the loss, not the one that creates it.
+    buy_order = place_buy_order(buy_strike_symbol, buy_security_id, quantity)
+    if buy_order['orderStatus'] != "TRADED":
+        # Nothing is on the book, so it is safe to skip this entry and let the main
+        # loop try again on the next pass.
+        util.notify(f"Hedge leg not filled, no spread created: {buy_order}",slack_client=slack_client)
+        raise Exception("Buy leg not filled - " + str(buy_order))
+
+    sell_order = place_sell_order(sell_strike_symbol, sell_security_id, quantity)
+    if sell_order['orderStatus'] != "TRADED":
+        # The hedge IS filled but the short is not, so we are sitting on a long
+        # option that nothing is watching, and no Mongo document was written. Stop
+        # the bot: if we carried on looping it would place a second spread on top.
+        util.notify(f"SHORT LEG FAILED after the hedge filled. Long {buy_strike_symbol} is OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+        sys.exit(1)
+
+    short_option_cost = sell_order['averageTradedPrice']
+    long_option_cost = buy_order['averageTradedPrice']
+    util.notify("created bull put spread!",slack_client=slack_client)
+    record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 def calculate_pnl(quantity, long_entry, long_exit, short_entry, short_exit):
     pnl = float(quantity) * ((float(short_entry) - float(short_exit)) + (float(long_exit) - float(long_entry)))
@@ -372,29 +324,41 @@ def close_active_positions():
     util.notify(f"Closing active positions {instrument_name}",slack_client=slack_client)
     active_strategies = strategies.find({'strategy_state': 'active'})
     for strategy in active_strategies:
-        buy_order = place_buy_order(strategy['short_option_symbol'], strategy['quantity'])
+        # Buy back the SHORT leg first. That is the leg carrying the open risk, so
+        # if only one of the two goes through it needs to be this one.
+        buy_order = place_buy_order(strategy['short_option_symbol'], strategy['short_option_security_id'], strategy['quantity'])
+        if buy_order['orderStatus'] != "TRADED":
+            util.notify(f"Could not buy back the short leg {strategy['short_option_symbol']}. The spread is STILL OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+            sys.exit(1)
         util.notify("Short option leg closed",slack_client=slack_client)
-        if buy_order['order_status'] == "COMPLETE":
-            sell_order = place_sell_order(strategy['long_option_symbol'], strategy['quantity'])
-            util.notify("Long option leg closed",slack_client=slack_client)
-            update_last_exit_time()
-            strategies.update_one({'_id': strategy['_id']}, {'$set': {'strategy_state': 'closed'}})
-            strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_date': str(datetime.datetime.now().date())}})
-            strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_time': datetime.datetime.now().strftime('%H:%M')}})
-            strategies.update_one({'_id': strategy['_id']}, {'$set': {'short_exit_price': buy_order['average_traded_price']}})
-            strategies.update_one({'_id': strategy['_id']}, {'$set': {'long_exit_price': sell_order['average_traded_price']}})
-            pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], sell_order['average_traded_price'], strategy['short_option_cost'],buy_order['average_traded_price'])
-            util.notify(f"Realized Gains: {round(pnl, 2)}",slack_client=slack_client)
-            strategies.update_one({'_id': strategy['_id']}, {'$set': {'pnl': pnl}})
+
+        sell_order = place_sell_order(strategy['long_option_symbol'], strategy['long_option_security_id'], strategy['quantity'])
+        if sell_order['orderStatus'] != "TRADED":
+            # Retrying this on the next loop would buy back the short leg a second
+            # time and leave us naked long, so stop instead.
+            util.notify(f"Short leg is closed but the long hedge {strategy['long_option_symbol']} is STILL OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+            sys.exit(1)
+        util.notify("Long option leg closed",slack_client=slack_client)
+
+        update_last_exit_time()
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'strategy_state': 'closed'}})
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_date': str(datetime.datetime.now().date())}})
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_time': datetime.datetime.now().strftime('%H:%M')}})
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'short_exit_price': buy_order['averageTradedPrice']}})
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'long_exit_price': sell_order['averageTradedPrice']}})
+        pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], sell_order['averageTradedPrice'], strategy['short_option_cost'],buy_order['averageTradedPrice'])
+        util.notify(f"Realized Gains: {round(pnl, 2)}",slack_client=slack_client)
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'pnl': pnl}})
     return
 
 # @retry(tries=5, delay=5, backoff=2)
 def get_pnl(strategy, start=None):
+    conn = edge.login_to_dhan()
     if start is None:
         days_ago = datetime.datetime.now() - timedelta(days=7)
         start = days_ago.replace(hour=9, minute=15, second=0, microsecond=0)
-    short_option_cost = edge.get_option_price('NFO', strategy['short_option_symbol'], start, datetime.datetime.today(), 'min')
-    long_option_cost = edge.get_option_price('NFO', strategy['long_option_symbol'], start, datetime.datetime.today(), 'min')
+    short_option_cost = edge.get_option_price(conn, strategy['short_option_security_id'], start, datetime.datetime.today(), 'min')
+    long_option_cost = edge.get_option_price(conn, strategy['long_option_security_id'], start, datetime.datetime.today(), 'min')
     current_pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], long_option_cost, strategy['short_option_cost'], short_option_cost)
     strategies.update_one({'_id': strategy['_id']}, {'$set': {'running_pnl': current_pnl}})
     return current_pnl

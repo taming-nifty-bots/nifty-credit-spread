@@ -1,6 +1,6 @@
 import sys
 import os
-from tamingnifty import connect_definedge as edge
+from tamingnifty import connect_dhan as edge
 from tamingnifty import utils as util
 from tamingnifty import ta
 from datetime import datetime, timedelta
@@ -111,7 +111,7 @@ def main():
                 start = start.replace(hour=9, minute=15, second=0, microsecond=0)
                 end = datetime.today()
 
-                conn = edge.login_to_integrate()
+                conn = edge.login_to_dhan()
                 initial_high, initial_low, initial_color = get_high_low(instrument)
 
                 df = ta.renko(conn = conn, exchange = 'NSE', trading_symbol = trading_symbol, start=start, end=datetime.today(), brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color, initial_datetime=days_ago)
