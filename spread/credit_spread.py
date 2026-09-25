@@ -389,6 +389,17 @@ def main():
                 last_notification_time = notification_time
                 
             print(f"current time: {current_time}")
+
+            # Log in here, outside the trading window check, so the token is minted
+            # when the bot starts rather than at the moment it wants to place an order.
+            # Dhan only allows one token every 2 minutes and the signal bot is a
+            # separate process asking for its own, so whoever asks second is refused.
+            # On 2026-09-25 the first login of the day happened at 2:44pm inside
+            # submit_order, collided with the signal bot, and the bull put spread was
+            # never created. After the first call this line is free - login_to_dhan()
+            # just returns the token already cached in os.environ.
+            edge.login_to_dhan()
+
             if current_time > trade_start_time:
                 print("Trading Window is active.")
                 if strategies.count_documents({'strategy_state': 'active'}) > 0:

@@ -93,6 +93,15 @@ def main():
             # Update the last notification time
             last_notification_time = notification_time
 
+        # Log in here, outside the trading window check, so the token is minted when
+        # the bot starts rather than at 9:16 when the spread bot is also starting.
+        # Dhan only allows one token every 2 minutes and the two bots are separate
+        # processes, so whoever asks second gets refused. After the first call this
+        # line is free - login_to_dhan() just returns the token cached in os.environ.
+        # Assigning conn here also means it is always defined for the end of day
+        # reseed below, which used to raise NameError if the bot started after 15:28.
+        conn = edge.login_to_dhan()
+
         if current_time > trade_start_time:
             for instrument in instrument_name:
 
@@ -111,7 +120,6 @@ def main():
                 start = start.replace(hour=9, minute=15, second=0, microsecond=0)
                 end = datetime.today()
 
-                conn = edge.login_to_dhan()
                 initial_high, initial_low, initial_color = get_high_low(instrument)
 
                 df = ta.renko(conn = conn, exchange = 'NSE', trading_symbol = trading_symbol, start=start, end=datetime.today(), brick_size=.05, last_high=initial_high, last_low=initial_low, initial_color=initial_color, initial_datetime=days_ago)
