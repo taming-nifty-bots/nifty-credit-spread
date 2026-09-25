@@ -236,7 +236,11 @@ def main():
 
             return
         
-        time.sleep(5)
+        # The Renko bricks are built from 1 minute candles, so polling faster than the
+        # data can change just rewrites an identical document. This loop is stateless -
+        # it recomputes the whole series from start_date every pass - so a longer sleep
+        # costs latency only, it can never skip a brick.
+        time.sleep(20)
 
 if __name__ == "__main__":
     main()

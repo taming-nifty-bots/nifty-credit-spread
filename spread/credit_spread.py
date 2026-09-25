@@ -39,6 +39,13 @@ quantity = os.environ.get('quantity')
 instrument_name = os.environ.get('instrument_name')
 lot_size = 65
 
+# Book the spread once this much of the credit has decayed away. The credit received
+# at entry is the most this trade can ever make, so this is a fraction of max profit,
+# not of the spread width. There is no stop loss on this strategy, so this target is
+# the only exit we choose ourselves - the other two, a Donchian flip and expiry day,
+# are dictated by the market.
+profit_target_pct = 0.70
+
 # Set live_trading=true in the .env only when you actually want real money orders
 # going to Dhan. Anything else - including the variable being missing entirely -
 # means orders are simulated, which is what forward testing runs on.
@@ -419,6 +426,24 @@ def main():
                         #     close_active_positions()
                         #     time.sleep(60)
                         #     break
+
+                        # Book the trade once 70% of the credit has decayed away.
+                        # total_credit_received is the most this spread can ever make,
+                        # so the target is a fraction of that, not of the 300 point width.
+                        #
+                        # The > 0 check matters. If the two strikes were ever resolved the
+                        # wrong way round the credit would be negative, the target would be
+                        # negative too, and pnl >= target would be true on the very first
+                        # pass after entry - the bot would close every spread seconds after
+                        # opening it. The older documents in this collection were written
+                        # by a debit spread version of this bot and do have a negative
+                        # credit, so this is not a hypothetical.
+                        profit_target = round(strategy['total_credit_received'] * profit_target_pct, 2)
+                        if strategy['total_credit_received'] > 0 and pnl >= profit_target:
+                            util.notify(f"TARGET HIT! Booking at {pnl} against a target of {profit_target}, which is {int(profit_target_pct * 100)}% of the {strategy['total_credit_received']} credit received.",slack_client=slack_client)
+                            close_active_positions()
+                            time.sleep(60)
+                            break
 
                         if (strategy['trend'] == 'Bullish' and get_instrument_close() < get_low40()) or (strategy['trend'] == 'Bearish' and get_instrument_close() > get_high40()):
                             util.notify(f"Donchian Trend Changed",slack_client=slack_client)
