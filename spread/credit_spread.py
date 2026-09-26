@@ -38,6 +38,8 @@ slack_client = WebClient(token=os.environ.get('slack_token'))
 quantity = os.environ.get('quantity')
 instrument_name = os.environ.get('instrument_name')
 lot_size = 65
+# Biggest single NIFTY order the exchange will accept - see check_quantity().
+NIFTY_FREEZE_QTY = 1756
 
 # Set live_trading=true in the .env only when you actually want real money orders
 # going to Dhan. Anything else - including the variable being missing entirely -
@@ -113,10 +115,14 @@ def check_quantity(qty):
     This runs before the FIRST leg is sent, not after. A spread where one leg is
     accepted and the other is rejected for being too large would leave a naked short
     option running, which is the worst thing this bot could possibly do.
+
+    The limit lives here rather than in tamingnifty because it is a NIFTY number -
+    BANKNIFTY's is different - and the exchange revises it from time to time. If it
+    ever changes, this is the one line to update. 1756 is 27 lots of 65.
     """
-    if int(qty) > edge.NIFTY_FREEZE_QTY:
+    if int(qty) > NIFTY_FREEZE_QTY:
         message = (f"Quantity {qty} is above the exchange freeze limit of "
-                   f"{edge.NIFTY_FREEZE_QTY}. No order was placed.")
+                   f"{NIFTY_FREEZE_QTY}. No order was placed.")
         util.notify(message, slack_client=slack_client)
         raise Exception(message)
 
