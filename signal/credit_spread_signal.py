@@ -162,16 +162,25 @@ def main():
                     # condition would never fire cleanly in a trend.
                     high40 = df.iloc[-41:-1]['high'].max()
                     low40 = df.iloc[-41:-1]['low'].min()
+
+                    # Exit channels, tighter than the 40 brick entry and different per
+                    # side. Entry still needs the 40 brick break, so between the exit
+                    # level and the opposite entry level the executor sits flat - which
+                    # it could never do while both used the same channel.
+                    low30 = df.iloc[-31:-1]['low'].min()
+                    high15 = df.iloc[-16:-1]['high'].max()
+
                     df = ta.rsi(df, period=40)
                     print(f"40 brick High: {high40}, Low: {low40}, RSI: {df.iloc[-1]['rsi']}")
+                    print(f"exit channels - 30 brick Low: {low30}, 15 brick High: {high15}")
 
                     doc_id = renko_doc_id(instrument)
                     if supertrend_collection.count_documents({"_id": doc_id}) == 0:
-                        st = {"_id": doc_id, "datetime": df.iloc[-1]['datetime'], "color": df.iloc[-1]['color'], "close": df.iloc[-1]['close'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "start_date": start, "chart": "renko"}
+                        st = {"_id": doc_id, "datetime": df.iloc[-1]['datetime'], "color": df.iloc[-1]['color'], "close": df.iloc[-1]['close'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "last30_low": low30, "last15_high": high15, "start_date": start, "chart": "renko"}
                         supertrend_collection.insert_one(st)
                     else:
                         supertrend_collection.update_one({'_id': doc_id}, {'$set': {"datetime": df.iloc[-1]['datetime'],
-                                    "close": df.iloc[-1]['close'], "color": df.iloc[-1]['color'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "chart": "renko"}})
+                                    "close": df.iloc[-1]['close'], "color": df.iloc[-1]['color'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "last30_low": low30, "last15_high": high15, "chart": "renko"}})
 
                     # Camarilla H4/L4: written separately from the signal fields above
                     # so that a failure here can never disturb them.

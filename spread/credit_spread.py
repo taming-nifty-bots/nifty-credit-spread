@@ -76,6 +76,21 @@ def get_low40():
     print(f"{instrument_name} Low of last 40 bricks: {supertrend['last40_low']}")
     return supertrend['last40_low']
 
+# Exits use their own, tighter channels - 30 bricks for a long, 15 for a short. Entry
+# still needs the 40 brick break, so the bot can now sit flat between the two levels
+# instead of always being stopped and reversed into the other side.
+def get_low30():
+    #
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+    print(f"{instrument_name} Low of last 30 bricks: {supertrend['last30_low']}")
+    return supertrend['last30_low']
+
+def get_high15():
+    #
+    supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
+    print(f"{instrument_name} High of last 15 bricks: {supertrend['last15_high']}")
+    return supertrend['last15_high']
+
 @retry(tries=5, delay=5, backoff=2)
 def get_close_time():
     #
@@ -212,11 +227,11 @@ def create_bear_call_spread():
     option_type = "CE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm + 100
-    buy_strike = atm + 400
+    sell_strike = atm
+    buy_strike = atm + 300
     util.notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
-    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name)
-    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=8)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=8)
     print(f"Expiry: {expiry}")
 
     # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
@@ -291,11 +306,11 @@ def create_bull_put_spread():
     option_type = "PE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm - 100
-    buy_strike = atm - 400
+    sell_strike = atm
+    buy_strike = atm - 300
     util.notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
-    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name)
-    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=8)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=8)
     print(f"Expiry: {expiry}")
 
     # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
@@ -439,7 +454,7 @@ def main():
                         # (+5,140 average) mostly disappeared. Net cost over the window was
                         # 2,561 on one lot. The trade is held to a flip or to expiry.
 
-                        if (strategy['trend'] == 'Bullish' and get_instrument_close() < get_low40()) or (strategy['trend'] == 'Bearish' and get_instrument_close() > get_high40()):
+                        if (strategy['trend'] == 'Bullish' and get_instrument_close() < get_low30()) or (strategy['trend'] == 'Bearish' and get_instrument_close() > get_high15()):
                             util.notify(f"Donchian Trend Changed",slack_client=slack_client)
                             close_active_positions()
                             time.sleep(60)
