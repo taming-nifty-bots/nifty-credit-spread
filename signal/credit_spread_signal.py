@@ -128,14 +128,17 @@ def main():
                 # Update the last notification time
                 last_notification_time = notification_time
 
-            # Log in here, outside the trading window check, so the token is minted when
-            # the bot starts rather than at 9:16 when the spread bot is also starting.
-            # Dhan only allows one token every 2 minutes and the two bots are separate
-            # processes, so whoever asks second gets refused. After the first call this
-            # line is free - login_to_dhan() just returns the token cached in os.environ.
+            # Log in here, outside the trading window check, so the bot holds a token
+            # from the moment it starts rather than first reaching for one at 9:16.
+            #
+            # Since tamingnifty 2.2.0 this line is cheap and safe to call every pass:
+            # Dhan keeps only ONE live token per account, so the bots share a single
+            # token through Mongo instead of each minting its own. Reading it every
+            # pass is the point - if another bot ever does have to mint, we pick the
+            # new one up here rather than spending the session failing on a dead one.
             # Assigning conn here also means it is always defined for the end of day
             # reseed below, which used to raise NameError if the bot started after 15:28.
-            conn = edge.login_to_dhan()
+            conn = edge.login_to_dhan(slack_channel=slack_channel)
 
             if current_time > trade_start_time:
                 for instrument in instrument_name:
@@ -216,7 +219,24 @@ def main():
             # version goes to Slack, because this handler can fire every 20 seconds.
             traceback.print_exc()
             error_text = util.exception_detail(e)
-            print(f"Exception occurred: {error_text}")
+            print(f"Exception occurred: {error_text}", flush=True)
+
+            # "Invalid Token" means the token every bot shares has been killed by
+            # something outside our bots - a login from the Dhan website, or a script
+            # run by hand. Nothing else in this loop can recover from that, so mint a
+            # replacement and publish it. login_to_dhan checks the shared store first,
+            # so if another bot has already fixed it we adopt theirs instead of the
+            # two of us knocking each other over for the rest of the session.
+            #
+            # Its own try/except: the login carries a 375 second retry ladder, and
+            # letting it raise here would kill the bot from inside the handler that
+            # exists to keep it alive.
+            if "Invalid Token" in error_text:
+                try:
+                    edge.login_to_dhan(fresh=True, slack_channel=slack_channel)
+                except Exception as login_error:
+                    print(f"Could not replace the dead Dhan token: "
+                          f"{util.exception_detail(login_error)}", flush=True)
 
             if last_error is None:
                 should_notify = True
