@@ -259,8 +259,8 @@ def create_bear_call_spread():
     sell_strike = atm
     buy_strike = atm + 300
     safe_notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
-    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=8)
-    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=8)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=5)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=5)
     print(f"Expiry: {expiry}")
 
     # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
@@ -341,8 +341,8 @@ def create_bull_put_spread():
     sell_strike = atm
     buy_strike = atm - 300
     safe_notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
-    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=8)
-    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=8)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=5)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=5)
     print(f"Expiry: {expiry}")
 
     # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
