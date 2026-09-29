@@ -4,6 +4,7 @@ import sys
 from tamingnifty import connect_dhan as edge
 from tamingnifty import utils as util
 import time
+import traceback
 from retry import retry
 import datetime
 from datetime import timedelta
@@ -59,6 +60,17 @@ orders = mongo_client['Bots'][orders_collection_name]  # orders collection
 supertrend_collection = mongo_client['Bots']["supertrend"]
 
 
+# Sending the message must never be the thing that kills the bot. util.notify retries
+# the Slack post and then raises, so calling it raw from inside an exception handler -
+# which this file did at the bottom of the main loop - means one Slack outage takes
+# down a bot that is holding an open spread. Copied from credit_spread_signal.py.
+def safe_notify(message):
+    try:
+        util.notify(message=message, slack_client=slack_client, slack_channel=slack_channel)
+    except Exception as e:
+        print(f"Could not send the Slack message '{message}': {util.exception_detail(e)}")
+
+
 def get_instrument_close():
     supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
     print(f"{instrument_name} Close: {supertrend['close']}")
@@ -106,7 +118,7 @@ def get_camarilla_context():
         supertrend = supertrend_collection.find_one({"_id": mongo_doc_id})
         return {k: supertrend[k] for k in ('cam_h4', 'cam_l4') if k in supertrend}
     except Exception as e:
-        print(f"[camarilla] unavailable ({e}) - trade unaffected")
+        print(f"[camarilla] unavailable ({util.exception_detail(e)}) - trade unaffected")
         return {}
 
 
@@ -123,6 +135,23 @@ def update_last_exit_time():
     supertrend_collection.update_one({"_id": mongo_doc_id}, {"$set": {"lastexittime": get_close_time()}})
     return
 
+def days_to_expiry(expiry):
+    """
+    Calendar days from today to the contract expiry.
+
+    Reported on every entry because min_dte=8 does not pin the tenor: Nifty lists
+    weekly expiries, so what you actually buy lands anywhere in the 9-15 day range
+    depending on which weekday the entry fires. The forward test record is only
+    readable if each trade says which one it got.
+    """
+    try:
+        d = expiry.date() if hasattr(expiry, 'date') else parser.parse(str(expiry)).date()
+        return (d - datetime.datetime.now().date()).days
+    except Exception as e:
+        print(f"[dte] could not read expiry {expiry}: {util.exception_detail(e)}")
+        return "?"
+
+
 def check_quantity(qty):
     """
     Refuse anything above the exchange freeze limit.
@@ -138,7 +167,7 @@ def check_quantity(qty):
     if int(qty) > NIFTY_FREEZE_QTY:
         message = (f"Quantity {qty} is above the exchange freeze limit of "
                    f"{NIFTY_FREEZE_QTY}. No order was placed.")
-        util.notify(message, slack_client=slack_client)
+        safe_notify(message)
         raise Exception(message)
 
 
@@ -194,7 +223,7 @@ def submit_order(symbol, security_id, qty, transaction_type):
         order = simulated_order(conn, symbol, security_id, qty, transaction_type)
 
     print(f"Order placed: {order}")
-    util.notify(f"Order placed: {order}", slack_client=slack_client)
+    safe_notify(f"Order placed: {order}")
     orders.insert_one(order)
     return order
 
@@ -229,7 +258,7 @@ def create_bear_call_spread():
     instrument_close = get_instrument_close()
     sell_strike = atm
     buy_strike = atm + 300
-    util.notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
+    safe_notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
     sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=8)
     buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=8)
     print(f"Expiry: {expiry}")
@@ -240,7 +269,7 @@ def create_bear_call_spread():
     if buy_order['orderStatus'] != "TRADED":
         # Nothing is on the book, so it is safe to skip this entry and let the main
         # loop try again on the next pass.
-        util.notify(f"Hedge leg not filled, no spread created: {buy_order}",slack_client=slack_client)
+        safe_notify(f"Hedge leg not filled, no spread created: {buy_order}")
         raise Exception("Buy leg not filled - " + str(buy_order))
 
     sell_order = place_sell_order(sell_strike_symbol, sell_security_id, quantity)
@@ -248,12 +277,15 @@ def create_bear_call_spread():
         # The hedge IS filled but the short is not, so we are sitting on a long
         # option that nothing is watching, and no Mongo document was written. Stop
         # the bot: if we carried on looping it would place a second spread on top.
-        util.notify(f"SHORT LEG FAILED after the hedge filled. Long {buy_strike_symbol} is OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+        safe_notify(f"SHORT LEG FAILED after the hedge filled. Long {buy_strike_symbol} is OPEN. MANUAL ACTION REQUIRED. Bot is stopping.")
         sys.exit(1)
 
     short_option_cost = sell_order['averageTradedPrice']
     long_option_cost = buy_order['averageTradedPrice']
-    util.notify("created bear call spread!",slack_client=slack_client)
+    safe_notify(f"Created BEAR CALL spread | SHORT {sell_strike_symbol} @ {short_option_cost} | "
+                f"LONG {buy_strike_symbol} @ {long_option_cost} | width {buy_strike - sell_strike} | "
+                f"credit {round((short_option_cost - long_option_cost) * int(quantity), 2)} on qty {quantity} | "
+                f"expiry {expiry} ({days_to_expiry(expiry)} DTE) | {instrument_name} close {round(instrument_close, 2)}")
     record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 
@@ -308,7 +340,7 @@ def create_bull_put_spread():
     instrument_close = get_instrument_close()
     sell_strike = atm
     buy_strike = atm - 300
-    util.notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}",slack_client=slack_client)
+    safe_notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
     sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=8)
     buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=8)
     print(f"Expiry: {expiry}")
@@ -319,7 +351,7 @@ def create_bull_put_spread():
     if buy_order['orderStatus'] != "TRADED":
         # Nothing is on the book, so it is safe to skip this entry and let the main
         # loop try again on the next pass.
-        util.notify(f"Hedge leg not filled, no spread created: {buy_order}",slack_client=slack_client)
+        safe_notify(f"Hedge leg not filled, no spread created: {buy_order}")
         raise Exception("Buy leg not filled - " + str(buy_order))
 
     sell_order = place_sell_order(sell_strike_symbol, sell_security_id, quantity)
@@ -327,12 +359,15 @@ def create_bull_put_spread():
         # The hedge IS filled but the short is not, so we are sitting on a long
         # option that nothing is watching, and no Mongo document was written. Stop
         # the bot: if we carried on looping it would place a second spread on top.
-        util.notify(f"SHORT LEG FAILED after the hedge filled. Long {buy_strike_symbol} is OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+        safe_notify(f"SHORT LEG FAILED after the hedge filled. Long {buy_strike_symbol} is OPEN. MANUAL ACTION REQUIRED. Bot is stopping.")
         sys.exit(1)
 
     short_option_cost = sell_order['averageTradedPrice']
     long_option_cost = buy_order['averageTradedPrice']
-    util.notify("created bull put spread!",slack_client=slack_client)
+    safe_notify(f"Created BULL PUT spread | SHORT {sell_strike_symbol} @ {short_option_cost} | "
+                f"LONG {buy_strike_symbol} @ {long_option_cost} | width {sell_strike - buy_strike} | "
+                f"credit {round((short_option_cost - long_option_cost) * int(quantity), 2)} on qty {quantity} | "
+                f"expiry {expiry} ({days_to_expiry(expiry)} DTE) | {instrument_name} close {round(instrument_close, 2)}")
     record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 def calculate_pnl(quantity, long_entry, long_exit, short_entry, short_exit):
@@ -340,35 +375,42 @@ def calculate_pnl(quantity, long_entry, long_exit, short_entry, short_exit):
     return round(pnl, 2)
 
 # @retry(tries=5, delay=5, backoff=2)
-def close_active_positions():
-    print(f"Closing active positions {instrument_name}")
-    util.notify(f"Closing active positions {instrument_name}",slack_client=slack_client)
+def close_active_positions(reason="unspecified"):
+    """`reason` is carried into Slack and onto the closed strategy document. Without
+    it the channel shows an exit with no way to tell a channel break from an expiry
+    close from a manual stop, which makes the forward test log unreadable later."""
+    print(f"Closing active positions {instrument_name} - {reason}")
+    safe_notify(f"CLOSING {instrument_name} positions - {reason}")
     active_strategies = strategies.find({'strategy_state': 'active'})
     for strategy in active_strategies:
         # Buy back the SHORT leg first. That is the leg carrying the open risk, so
         # if only one of the two goes through it needs to be this one.
         buy_order = place_buy_order(strategy['short_option_symbol'], strategy['short_option_security_id'], strategy['quantity'])
         if buy_order['orderStatus'] != "TRADED":
-            util.notify(f"Could not buy back the short leg {strategy['short_option_symbol']}. The spread is STILL OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+            safe_notify(f"Could not buy back the short leg {strategy['short_option_symbol']}. The spread is STILL OPEN. MANUAL ACTION REQUIRED. Bot is stopping.")
             sys.exit(1)
-        util.notify("Short option leg closed",slack_client=slack_client)
+        safe_notify(f"Short leg closed: {strategy['short_option_symbol']} bought back @ {buy_order['averageTradedPrice']} (entry was {strategy['short_option_cost']})")
 
         sell_order = place_sell_order(strategy['long_option_symbol'], strategy['long_option_security_id'], strategy['quantity'])
         if sell_order['orderStatus'] != "TRADED":
             # Retrying this on the next loop would buy back the short leg a second
             # time and leave us naked long, so stop instead.
-            util.notify(f"Short leg is closed but the long hedge {strategy['long_option_symbol']} is STILL OPEN. MANUAL ACTION REQUIRED. Bot is stopping.",slack_client=slack_client)
+            safe_notify(f"Short leg is closed but the long hedge {strategy['long_option_symbol']} is STILL OPEN. MANUAL ACTION REQUIRED. Bot is stopping.")
             sys.exit(1)
-        util.notify("Long option leg closed",slack_client=slack_client)
+        safe_notify(f"Long leg closed: {strategy['long_option_symbol']} sold @ {sell_order['averageTradedPrice']} (entry was {strategy['long_option_cost']})")
 
         update_last_exit_time()
         strategies.update_one({'_id': strategy['_id']}, {'$set': {'strategy_state': 'closed'}})
         strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_date': str(datetime.datetime.now().date())}})
         strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_time': datetime.datetime.now().strftime('%H:%M')}})
+        strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_reason': reason}})
         strategies.update_one({'_id': strategy['_id']}, {'$set': {'short_exit_price': buy_order['averageTradedPrice']}})
         strategies.update_one({'_id': strategy['_id']}, {'$set': {'long_exit_price': sell_order['averageTradedPrice']}})
         pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], sell_order['averageTradedPrice'], strategy['short_option_cost'],buy_order['averageTradedPrice'])
-        util.notify(f"Realized Gains: {round(pnl, 2)}",slack_client=slack_client)
+        held = days_to_expiry(strategy['entry_date'])
+        safe_notify(f"CLOSED {strategy['trend']} spread | realized {round(pnl, 2)} | "
+                    f"entered {strategy['entry_date']} {strategy['entry_time']} (held {abs(held) if held != '?' else '?'} days) | "
+                    f"credit was {strategy['total_credit_received']} | reason: {reason}")
         strategies.update_one({'_id': strategy['_id']}, {'$set': {'pnl': pnl}})
     return
 
@@ -388,17 +430,30 @@ def get_pnl(strategy, start=None):
 
 # @retry(tries=5, delay=5, backoff=2)
 def main():
-    util.notify(f"{instrument_name} Positional bot kicked off",slack_client=slack_client)
+    safe_notify(f"{instrument_name} Positional bot kicked off")
     # This is the bot that actually places orders, so the IP matters most here: Dhan
     # whitelists exactly one static IP and rejects orders from anywhere else. Reporting
     # it at startup means a mismatch shows up in Slack before a trade fails, not after.
-    util.notify(f"{instrument_name} Positional bot public IP: {util.get_public_ip()}",slack_client=slack_client)
+    safe_notify(f"{instrument_name} Positional bot public IP: {util.get_public_ip()}")
     print(f"{instrument_name} Positional bot kicked off")
     days_ago = datetime.datetime.now() - timedelta(days=7)
     start = days_ago.replace(hour=9, minute=15, second=0, microsecond=0)
     
     # Track the time when the last notification was sent
     last_notification_time = datetime.datetime.now()
+
+    # Remember the last error reported. This loop runs every 10 seconds, so an error
+    # that keeps happening would post 6 Slack messages a minute and train us to ignore
+    # the channel - which is exactly what happened on 2026-09-28. Report a new error
+    # straight away, repeat it at most once every 15 minutes, and say so when it clears.
+    # Same pattern as credit_spread_signal.py.
+    last_error = None
+    last_error_time = None
+
+    # What the last completed pass saw. Carried so the hourly heartbeat can say
+    # something useful instead of only that the process is still running.
+    latest_state = "no pass completed yet"
+
     while True:
         try:
             current_time = datetime.datetime.now().time()
@@ -408,11 +463,10 @@ def main():
             elapsed_time = notification_time - last_notification_time
             print(f"elapsed time: {elapsed_time}")
             if elapsed_time >= timedelta(hours=1):
-                util.notify(message=f"{instrument_name} Weekly Credit Spread bot is Alive!", slack_client=slack_client)
-                util.notify(message=f"current time from {instrument_name} Credit Spread: {current_time}", slack_client=slack_client)
+                safe_notify(f"{instrument_name} Credit Spread alive at {current_time:%H:%M:%S} | {latest_state}")
                 # Update the last notification time
                 last_notification_time = notification_time
-                
+
             print(f"current time: {current_time}")
 
             # Log in here, outside the trading window check, so the token is minted
@@ -440,7 +494,7 @@ def main():
                             strategies.update_one({'_id': strategy['_id']}, {'$set': {'min_pnl_reached': pnl}})
                         
                         # if pnl <= strategy['trailing_stop_loss']:
-                        #     util.notify(f"SL HIT! Current PnL: {pnl}",slack_client=slack_client, slack_channel=slack_channel)
+                        #     safe_notify(f"SL HIT! Current PnL: {pnl}")
                         #     close_active_positions()
                         #     time.sleep(60)
                         #     break
@@ -454,30 +508,78 @@ def main():
                         # (+5,140 average) mostly disappeared. Net cost over the window was
                         # 2,561 on one lot. The trade is held to a flip or to expiry.
 
-                        if (strategy['trend'] == 'Bullish' and get_instrument_close() < get_low30()) or (strategy['trend'] == 'Bearish' and get_instrument_close() > get_high15()):
-                            util.notify(f"Donchian Trend Changed",slack_client=slack_client)
-                            close_active_positions()
+                        # Read once into locals. The getters each hit Mongo, and the old
+                        # code called them twice in the condition and then had no values
+                        # left to put in the message.
+                        close = get_instrument_close()
+                        low30 = get_low30()
+                        high15 = get_high15()
+                        latest_state = (f"holding {strategy['trend']} spread | close {close} | "
+                                        f"exit long<{low30} short>{high15} | running pnl {round(pnl, 2)}")
+
+                        if (strategy['trend'] == 'Bullish' and close < low30) or (strategy['trend'] == 'Bearish' and close > high15):
+                            level = low30 if strategy['trend'] == 'Bullish' else high15
+                            side = "below 30 brick low" if strategy['trend'] == 'Bullish' else "above 15 brick high"
+                            reason = f"Donchian flip - {instrument_name} close {close} went {side} {level} against a {strategy['trend']} spread"
+                            # close_active_positions announces the reason itself, so
+                            # there is no separate "Trend Changed" line any more.
+                            close_active_positions(reason=reason)
                             time.sleep(60)
                             break
 
                         print(str(datetime.datetime.now().date()))
                         if current_time > datetime.time(hour=11, minute=45) and strategy['expiry'] == str(datetime.datetime.now().date()):
-                            util.notify("Closing positions on Expiry",slack_client=slack_client)
-                            close_active_positions()
+                            close_active_positions(reason=f"expiry day {strategy['expiry']}, closing at {current_time:%H:%M:%S}")
                             break
                 else:
-                    if get_instrument_close() > get_high40() and get_close_time() > get_last_exit_time():
+                    close = get_instrument_close()
+                    high40 = get_high40()
+                    low40 = get_low40()
+                    close_time = get_close_time()
+                    last_exit_time = get_last_exit_time()
+                    latest_state = (f"flat | close {close} | entry 40 brick {low40} - {high40} | "
+                                    f"last brick {close_time} | last exit {last_exit_time}")
+
+                    if close > high40 and close_time > last_exit_time:
                         create_bull_put_spread()
-                    elif get_instrument_close() < get_low40() and get_close_time() > get_last_exit_time():
+                    elif close < low40 and close_time > last_exit_time:
                         create_bear_call_spread()
                     else:
-                        print("waiting for a breakout to create new positions!")
+                        # Says why nothing happened, which is almost always one of two
+                        # things: the close is inside the channel, or the last brick is
+                        # older than the exit that already used it.
+                        blocked = "" if close_time > last_exit_time else f" (last brick {close_time} is not newer than the last exit {last_exit_time})"
+                        print(f"waiting for a breakout - close {close} inside 40 brick channel {low40} - {high40}{blocked}", flush=True)
+
+            # Got all the way through without raising. If we were failing before, say
+            # so - otherwise the channel shows an error and never tells you it stopped.
+            if last_error is not None:
+                safe_notify("Credit Spread bot recovered, the loop is running again.")
+                last_error = None
+                last_error_time = None
+
         except Exception as e:
-            util.notify(f"Exception occurred: {str(e)}", slack_client=slack_client, slack_channel=slack_channel)
-        
+            # The full traceback goes to stdout (Azure keeps it); only the one-line
+            # version goes to Slack, because this handler can fire every 10 seconds.
+            traceback.print_exc()
+            error_text = util.exception_detail(e)
+            print(f"Exception occurred: {error_text}", flush=True)
+
+            if last_error is None or error_text != last_error:
+                should_notify = True
+            elif datetime.datetime.now() - last_error_time >= timedelta(minutes=15):
+                should_notify = True
+            else:
+                should_notify = False
+
+            if should_notify:
+                safe_notify(f"Credit Spread bot exception: {error_text}")
+                last_error = error_text
+                last_error_time = datetime.datetime.now()
+
         if current_time > trade_end_time:
-            util.notify("Closing Bell, Bot will exit now",slack_client=slack_client)
-            return   
+            safe_notify(f"Closing Bell, {instrument_name} Credit Spread bot exiting | {latest_state}")
+            return
         time.sleep(10)
 if __name__ == "__main__":
     main()

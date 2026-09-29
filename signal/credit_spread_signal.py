@@ -9,6 +9,7 @@ import pandas as pd
 pd.set_option('display.max_rows', None)
 import time
 import sys
+import traceback
 from retry import retry
 from slack_sdk import WebClient
 from pymongo import MongoClient
@@ -69,7 +70,7 @@ def camarilla_levels(conn, trading_symbol):
         return {"cam_h4": round(close + 0.55 * rng, 2),
                 "cam_l4": round(close - 0.55 * rng, 2)}
     except Exception as e:
-        print(f"[camarilla] unavailable ({e}) - signal unaffected")
+        print(f"[camarilla] unavailable ({util.exception_detail(e)}) - signal unaffected")
         return {}
 
 
@@ -80,7 +81,7 @@ def safe_notify(message):
     try:
         util.notify(message=message, slack_client=slack_client, slack_channel=slack_channel)
     except Exception as e:
-        print(f"Could not send the Slack message '{message}': {e}")
+        print(f"Could not send the Slack message '{message}': {util.exception_detail(e)}")
 
 
 #@retry(tries=5, delay=5, backoff=2)
@@ -102,6 +103,12 @@ def main():
     last_error = None
     last_error_time = None
 
+    # What the last completed pass computed. The hourly heartbeat used to say only
+    # "bot is Alive!" and the time, which tells you the process is up but nothing
+    # about whether the numbers it is publishing are sane. Carrying the levels here
+    # means one glance at Slack shows what the spread bot is being handed.
+    latest_levels = "no bricks computed yet"
+
     while True:
         current_time = datetime.now().time()
 
@@ -117,8 +124,7 @@ def main():
             elapsed_time = notification_time - last_notification_time
             print(f"elapsed time: {elapsed_time}")
             if elapsed_time >= timedelta(hours=1):
-                safe_notify(f"{instrument_name} Supertrend bot is Alive!")
-                safe_notify(f"current time from {instrument_name} Supertrend: {current_time}")
+                safe_notify(f"{instrument_name} Supertrend alive at {current_time:%H:%M:%S} | {latest_levels}")
                 # Update the last notification time
                 last_notification_time = notification_time
 
@@ -174,6 +180,13 @@ def main():
                     print(f"40 brick High: {high40}, Low: {low40}, RSI: {df.iloc[-1]['rsi']}")
                     print(f"exit channels - 30 brick Low: {low30}, 15 brick High: {high15}")
 
+                    # Picked up by the hourly heartbeat above.
+                    latest_levels = (f"close {df.iloc[-1]['close']} ({df.iloc[-1]['color']}) | "
+                                     f"entry 40 brick {low40} - {high40} | "
+                                     f"exit long<{low30} short>{high15} | "
+                                     f"RSI {round(df.iloc[-1]['rsi'], 2)} | "
+                                     f"last brick {df.iloc[-1]['datetime']}")
+
                     doc_id = renko_doc_id(instrument)
                     if supertrend_collection.count_documents({"_id": doc_id}) == 0:
                         st = {"_id": doc_id, "datetime": df.iloc[-1]['datetime'], "color": df.iloc[-1]['color'], "close": df.iloc[-1]['close'], "rsi": df.iloc[-1]['rsi'], "last40_high": high40, "last40_low": low40, "last30_low": low30, "last15_high": high15, "start_date": start, "chart": "renko"}
@@ -199,7 +212,10 @@ def main():
                 last_error_time = None
 
         except Exception as e:
-            error_text = str(e)
+            # The full traceback goes to stdout (Azure keeps it); the one-line
+            # version goes to Slack, because this handler can fire every 20 seconds.
+            traceback.print_exc()
+            error_text = util.exception_detail(e)
             print(f"Exception occurred: {error_text}")
 
             if last_error is None:
@@ -246,7 +262,8 @@ def main():
                 # Loud on purpose. Without a reseed the doc keeps today's old seed, so
                 # tomorrow's chart rebuilds from a stale start_date - it will still run,
                 # it will just be wrong, and nothing else will ever tell you.
-                safe_notify(f"END OF DAY RESEED FAILED: {str(e)} - NIFTY_Renko still holds today's old seed. Check it before 9:15 tomorrow.")
+                traceback.print_exc()
+                safe_notify(f"END OF DAY RESEED FAILED: {util.exception_detail(e)} - NIFTY_Renko still holds today's old seed. Check it before 9:15 tomorrow.")
 
             return
         
