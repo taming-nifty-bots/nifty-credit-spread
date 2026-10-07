@@ -256,11 +256,11 @@ def create_bear_call_spread():
     option_type = "CE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm
-    buy_strike = atm + 300
+    sell_strike = atm + 100
+    buy_strike = sell_strike + 300
     safe_notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
-    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=5)
-    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=5)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=6)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=6)
     print(f"Expiry: {expiry}")
 
     # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
@@ -338,11 +338,11 @@ def create_bull_put_spread():
     option_type = "PE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm
-    buy_strike = atm - 300
+    sell_strike = atm - 100
+    buy_strike = sell_strike - 300
     safe_notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
-    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=5)
-    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=5)
+    sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=6)
+    buy_strike_symbol, buy_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(buy_strike, option_type, instrument_name, min_dte=6)
     print(f"Expiry: {expiry}")
 
     # Buy the far hedge FIRST. If only one leg of the two ever goes through, we want
