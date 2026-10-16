@@ -315,7 +315,6 @@ def record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_sym
     'short_option_cost' : short_option_cost,
     'long_option_cost' : long_option_cost,
     'total_credit_received' : round((short_option_cost - long_option_cost) * int(quantity),2),
-    'target' : 0.5 * round((short_option_cost - long_option_cost) * int(quantity),2),
     # 'stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
     # 'trailing_stop_loss' : round((short_option_cost - long_option_cost) * int(quantity) * -0.5,2),
     'entry_time' : datetime.datetime.now().strftime('%H:%M'),
@@ -515,17 +514,11 @@ def main():
                         # Read once into locals. The getters each hit Mongo, and the old
                         # code called them twice in the condition and then had no values
                         # left to put in the message.
-                        target = strategy['target']
                         close = get_instrument_close()
                         low30 = get_low30()
                         high15 = get_high15()
                         latest_state = (f"holding {strategy['trend']} spread | close {close} | "
                                         f"exit long<{low30} short>{high15} | running pnl {round(pnl, 2)}")
-                        if pnl >= target:
-                            reason = f"Profit target hit - running pnl {round(pnl, 2)} reached target {target}"
-                            close_active_positions(reason=reason)
-                            time.sleep(60)
-                            break
                         
                         if (strategy['trend'] == 'Bullish' and close < low30) or (strategy['trend'] == 'Bearish' and close > high15):
                             level = low30 if strategy['trend'] == 'Bullish' else high15
