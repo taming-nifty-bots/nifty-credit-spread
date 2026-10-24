@@ -256,7 +256,7 @@ def create_bear_call_spread():
     option_type = "CE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm + 100
+    sell_strike = atm
     buy_strike = sell_strike + 300
     safe_notify(f"ST Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
     sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=6)
@@ -338,7 +338,7 @@ def create_bull_put_spread():
     option_type = "PE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
-    sell_strike = atm - 100
+    sell_strike = atm
     buy_strike = sell_strike - 300
     safe_notify(f"ATM Strike: {atm}, SELL Strike: {sell_strike}, BUY Strike: {buy_strike}, Instrument Close: {instrument_close}")
     sell_strike_symbol, sell_security_id, expiry, contract_lot_size = edge.get_index_option_symbol(sell_strike, option_type, instrument_name, min_dte=6)
@@ -502,14 +502,17 @@ def main():
                         #     time.sleep(60)
                         #     break
 
-                        # There is deliberately no profit target here. A 70% target was
-                        # tried and backtested over Jul-Sep 2026: it booked well on its own
-                        # exits, but it kept ending trades while the Donchian still pointed
-                        # the same way, so the bot re-entered the same trend at a worse
-                        # price. Donchian exits went from -4,680 across 13 trades to -30,930
-                        # across 14, and the run-to-expiry winners that pay for the losers
-                        # (+5,140 average) mostly disappeared. Net cost over the window was
-                        # 2,561 on one lot. The trade is held to a flip or to expiry.
+                        # Exit is Donchian flip or a 100pt favorable index move, not a
+                        # credit-based profit target. Two credit-based targets were tried
+                        # and both backed out: a 70% target (Jul-Sep 2026) cost 2,561 on one
+                        # lot because it kept closing trades while the Donchian still pointed
+                        # the same way, forcing a worse re-entry into the same trend; a 50%
+                        # target (Oct 12-16 2026) was added and reverted days later. The
+                        # 100pt index-move exit replaces both: backtested over 3 years of
+                        # Renko signal data, it accounts for nearly all of the signal's
+                        # profit (+62,893.9 pts across 470 exits, 99.8% win rate) while the
+                        # Donchian flip alone is almost purely a loss-cutter (-46,942.9 pts,
+                        # 3.8% win rate).
 
                         # Read once into locals. The getters each hit Mongo, and the old
                         # code called them twice in the condition and then had no values
@@ -519,13 +522,28 @@ def main():
                         high15 = get_high15()
                         latest_state = (f"holding {strategy['trend']} spread | close {close} | "
                                         f"exit long<{low30} short>{high15} | running pnl {round(pnl, 2)}")
-                        
+
+                        # Check for Donchian exit
                         if (strategy['trend'] == 'Bullish' and close < low30) or (strategy['trend'] == 'Bearish' and close > high15):
                             level = low30 if strategy['trend'] == 'Bullish' else high15
                             side = "below 30 brick low" if strategy['trend'] == 'Bullish' else "above 15 brick high"
                             reason = f"Donchian flip - {instrument_name} close {close} went {side} {level} against a {strategy['trend']} spread"
-                            # close_active_positions announces the reason itself, so
-                            # there is no separate "Trend Changed" line any more.
+                            close_active_positions(reason=reason)
+                            time.sleep(60)
+                            break
+
+                        # Check for 100-point index move exit (capture profit on favorable move)
+                        entry_close = strategy['instrument_close']
+                        index_move = close - entry_close
+                        if strategy['trend'] == 'Bullish' and index_move >= 100:
+                            # Bull Put Spread (sold puts): profit when index rises 100pts from entry
+                            reason = f"Index +100pts target - {instrument_name} moved from {entry_close} to {close} ({index_move:.1f}pts move)"
+                            close_active_positions(reason=reason)
+                            time.sleep(60)
+                            break
+                        elif strategy['trend'] == 'Bearish' and index_move <= -100:
+                            # Bear Call Spread (sold calls): profit when index falls 100pts from entry
+                            reason = f"Index -100pts target - {instrument_name} moved from {entry_close} to {close} ({index_move:.1f}pts move)"
                             close_active_positions(reason=reason)
                             time.sleep(60)
                             break
@@ -543,9 +561,9 @@ def main():
                     latest_state = (f"flat | close {close} | entry 40 brick {low40} - {high40} | "
                                     f"last brick {close_time} | last exit {last_exit_time}")
 
-                    if close > high40 and close_time > last_exit_time:
+                    if close > high40 and close_time > last_exit_time and current_time > parser.parse("10:00:00").time():
                         create_bull_put_spread()
-                    elif close < low40 and close_time > last_exit_time:
+                    elif close < low40 and close_time > last_exit_time and current_time > parser.parse("10:00:00").time():
                         create_bear_call_spread()
                     else:
                         # Says why nothing happened, which is almost always one of two
