@@ -3,6 +3,7 @@ import os
 import sys
 from tamingnifty import connect_dhan as edge
 from tamingnifty import utils as util
+from tamingnifty.charges import option_spread_charges
 import time
 import traceback
 from retry import retry
@@ -323,6 +324,8 @@ def record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_sym
     'expiry' : str(expiry),
     'running_pnl' : 0,
     'pnl': '',
+    'net_pnl': None,
+    'charges': None,
     'max_pnl_reached': 0,
     'min_pnl_reached': 0
     }
@@ -399,19 +402,37 @@ def close_active_positions(reason="unspecified"):
             sys.exit(1)
         safe_notify(f"Long leg closed: {strategy['long_option_symbol']} sold @ {sell_order['averageTradedPrice']} (entry was {strategy['long_option_cost']})")
 
+        closed_fields = {
+            'strategy_state': 'closed',
+            'exit_date': str(datetime.datetime.now().date()),
+            'exit_time': datetime.datetime.now().strftime('%H:%M'),
+            'exit_reason': reason,
+            'short_exit_price': buy_order['averageTradedPrice'],
+            'long_exit_price': sell_order['averageTradedPrice'],
+        }
+        try:
+            pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], sell_order['averageTradedPrice'], strategy['short_option_cost'], buy_order['averageTradedPrice'])
+            charges = option_spread_charges(
+                strategy['quantity'], strategy['long_option_cost'], sell_order['averageTradedPrice'],
+                strategy['short_option_cost'], buy_order['averageTradedPrice'])
+            net_pnl = round(pnl - charges['total'], 2)
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            # Both exit orders filled; a fee error must never cause another buyback.
+            closed_fields.update(net_pnl=None, charges=None, accounting_error=str(error))
+            strategies.update_one({'_id': strategy['_id']}, {'$set': closed_fields})
+            safe_notify(f"Spread CLOSED but accounting failed: {error}. MANUAL REVIEW REQUIRED. Bot is stopping.")
+            sys.exit(1)
+        closed_fields.update({
+            'pnl': pnl, 'net_pnl': net_pnl, 'charges': charges,
+            'running_pnl': pnl,
+        })
         update_last_exit_time()
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'strategy_state': 'closed'}})
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_date': str(datetime.datetime.now().date())}})
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_time': datetime.datetime.now().strftime('%H:%M')}})
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'exit_reason': reason}})
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'short_exit_price': buy_order['averageTradedPrice']}})
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'long_exit_price': sell_order['averageTradedPrice']}})
-        pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], sell_order['averageTradedPrice'], strategy['short_option_cost'],buy_order['averageTradedPrice'])
+        strategies.update_one({'_id': strategy['_id']}, {'$set': closed_fields})
         held = days_to_expiry(strategy['entry_date'])
-        safe_notify(f"CLOSED {strategy['trend']} spread | realized {round(pnl, 2)} | "
+        safe_notify(f"CLOSED {strategy['trend']} spread | gross {pnl:.2f} | "
+                    f"estimated charges {charges['total']:.2f} | net {net_pnl:.2f} | "
                     f"entered {strategy['entry_date']} {strategy['entry_time']} (held {abs(held) if held != '?' else '?'} days) | "
                     f"credit was {strategy['total_credit_received']} | reason: {reason}")
-        strategies.update_one({'_id': strategy['_id']}, {'$set': {'pnl': pnl}})
     return
 
 # @retry(tries=5, delay=5, backoff=2)
@@ -423,7 +444,9 @@ def get_pnl(strategy, start=None):
     short_option_cost = edge.get_option_price(conn, strategy['short_option_security_id'], start, datetime.datetime.today(), 'min')
     long_option_cost = edge.get_option_price(conn, strategy['long_option_security_id'], start, datetime.datetime.today(), 'min')
     current_pnl = calculate_pnl(strategy['quantity'], strategy['long_option_cost'], long_option_cost, strategy['short_option_cost'], short_option_cost)
-    strategies.update_one({'_id': strategy['_id']}, {'$set': {'running_pnl': current_pnl}})
+    strategies.update_one({'_id': strategy['_id']}, {'$set': {
+        'running_pnl': current_pnl,
+    }})
     return current_pnl
 
 
