@@ -4,6 +4,7 @@ import sys
 from tamingnifty import connect_dhan as edge
 from tamingnifty import utils as util
 from tamingnifty.charges import option_spread_charges
+from tamingnifty.safety import check_trading_day, assert_execution_clear, guarded_execution
 import time
 import traceback
 from retry import retry
@@ -132,8 +133,9 @@ def get_last_exit_time():
 
 @retry(tries=5, delay=5, backoff=2)
 def update_last_exit_time():
-    #
-    supertrend_collection.update_one({"_id": mongo_doc_id}, {"$set": {"lastexittime": get_close_time()}})
+    saved = supertrend_collection.update_one({"_id": mongo_doc_id}, {"$set": {"lastexittime": get_close_time()}})
+    if not saved.acknowledged or saved.matched_count != 1:
+        raise RuntimeError("Last exit time persistence not acknowledged")
     return
 
 def days_to_expiry(expiry):
@@ -180,8 +182,10 @@ def simulated_order(conn, symbol, security_id, qty, transaction_type):
 
     This is what runs during forward testing, i.e. whenever live_trading is false.
     """
-    start = datetime.datetime.now() - timedelta(days=7)
-    price = edge.get_option_price(conn, security_id, start, datetime.datetime.today(), 'min')
+    now = util.ist_now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    candles = edge.fetch_candles(conn, security_id, "NSE_FNO", "OPTIDX", start, now)
+    price = fresh_completed_close(candles, now)
     return {
         "orderId": "SIMULATED",
         "orderStatus": "TRADED",
@@ -225,7 +229,9 @@ def submit_order(symbol, security_id, qty, transaction_type):
 
     print(f"Order placed: {order}")
     safe_notify(f"Order placed: {order}")
-    orders.insert_one(order)
+    saved = orders.insert_one(order)
+    if not saved.acknowledged:
+        raise RuntimeError("Order record not acknowledged; reconcile before retrying")
     return order
 
 
@@ -253,7 +259,43 @@ def get_st_strike():
 
 
 # @retry(tries=5, delay=5, backoff=2)
+def fresh_completed_close(candles, now):
+    frame = candles.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
+    minute = pd.Timestamp(now).floor("min")
+    frame = frame.loc[(frame["datetime"] < minute)
+                      & (frame["datetime"] >= minute.normalize())].sort_values("datetime")
+    if frame.empty or frame["datetime"].duplicated().any():
+        raise ValueError("Missing or duplicate current-session completed candles")
+    if minute - frame.iloc[-1]["datetime"] > pd.Timedelta(minutes=2):
+        raise ValueError("Stale current-session candles; no entry or paper fill")
+    price = float(frame.iloc[-1]["close"])
+    if not pd.notna(price) or price <= 0 or price == float("inf"):
+        raise ValueError("Invalid completed candle close")
+    return price
+
+
+def entry_vix():
+    conn = edge.login_to_dhan(slack_channel=slack_channel)
+    now = util.ist_now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    candles = edge.fetch_historical_data(conn, "NSE", "Nifty 50", start, now)
+    fresh_completed_close(candles, now)
+    vix = float(edge.fetch_ltp(conn, "NSE", "India VIX"))
+    if not pd.notna(vix) or vix <= 0 or vix == float("inf"):
+        raise ValueError("Invalid India VIX; entry refused before orders")
+    return vix
+
+
 def create_bear_call_spread():
+    return guarded_execution(mongo_client, strategies_collection_name, safe_notify,
+                             "bear-call entry", _create_bear_call_spread)
+
+
+def _create_bear_call_spread():
+    if strategies.count_documents({"strategy_state": "active"}) != 0:
+        raise RuntimeError("An active spread already exists; refusing a second entry")
+    vix = entry_vix()
     option_type = "CE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
@@ -268,8 +310,7 @@ def create_bear_call_spread():
     # it to be the one that limits the loss, not the one that creates it.
     buy_order = place_buy_order(buy_strike_symbol, buy_security_id, quantity)
     if buy_order['orderStatus'] != "TRADED":
-        # Nothing is on the book, so it is safe to skip this entry and let the main
-        # loop try again on the next pass.
+        # A non-TRADED response can still have partial fills or a working order.
         safe_notify(f"Hedge leg not filled, no spread created: {buy_order}")
         raise Exception("Buy leg not filled - " + str(buy_order))
 
@@ -283,18 +324,16 @@ def create_bear_call_spread():
 
     short_option_cost = sell_order['averageTradedPrice']
     long_option_cost = buy_order['averageTradedPrice']
+    record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost, vix)
     safe_notify(f"Created BEAR CALL spread | SHORT {sell_strike_symbol} @ {short_option_cost} | "
                 f"LONG {buy_strike_symbol} @ {long_option_cost} | width {buy_strike - sell_strike} | "
                 f"credit {round((short_option_cost - long_option_cost) * int(quantity), 2)} on qty {quantity} | "
                 f"expiry {expiry} ({days_to_expiry(expiry)} DTE) | {instrument_name} close {round(instrument_close, 2)}")
-    record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bearish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 
 
 # @retry(tries=5, delay=5, backoff=2)
-def record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, trend, instrument_close, expiry, short_option_cost, long_option_cost):
-    conn = edge.login_to_dhan()
-    vix = edge.fetch_ltp(conn, 'NSE', 'India VIX')
+def record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, trend, instrument_close, expiry, short_option_cost, long_option_cost, vix):
     strategy = {
     'instrument_name': instrument_name,
     'India Vix': vix,
@@ -332,12 +371,22 @@ def record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_sym
     # Observational fields only - appended after the dict is built so they can
     # never interfere with any value above.
     strategy.update(get_camarilla_context())
-    strategies.insert_one(strategy)
+    saved = strategies.insert_one(strategy)
+    if not saved.acknowledged:
+        raise RuntimeError("Active strategy persistence not acknowledged")
 
 
 
 # @retry(tries=5, delay=5, backoff=2)
 def create_bull_put_spread():
+    return guarded_execution(mongo_client, strategies_collection_name, safe_notify,
+                             "bull-put entry", _create_bull_put_spread)
+
+
+def _create_bull_put_spread():
+    if strategies.count_documents({"strategy_state": "active"}) != 0:
+        raise RuntimeError("An active spread already exists; refusing a second entry")
+    vix = entry_vix()
     option_type = "PE"
     atm = get_st_strike()
     instrument_close = get_instrument_close()
@@ -352,8 +401,7 @@ def create_bull_put_spread():
     # it to be the one that limits the loss, not the one that creates it.
     buy_order = place_buy_order(buy_strike_symbol, buy_security_id, quantity)
     if buy_order['orderStatus'] != "TRADED":
-        # Nothing is on the book, so it is safe to skip this entry and let the main
-        # loop try again on the next pass.
+        # A non-TRADED response can still have partial fills or a working order.
         safe_notify(f"Hedge leg not filled, no spread created: {buy_order}")
         raise Exception("Buy leg not filled - " + str(buy_order))
 
@@ -367,11 +415,11 @@ def create_bull_put_spread():
 
     short_option_cost = sell_order['averageTradedPrice']
     long_option_cost = buy_order['averageTradedPrice']
+    record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost, vix)
     safe_notify(f"Created BULL PUT spread | SHORT {sell_strike_symbol} @ {short_option_cost} | "
                 f"LONG {buy_strike_symbol} @ {long_option_cost} | width {sell_strike - buy_strike} | "
                 f"credit {round((short_option_cost - long_option_cost) * int(quantity), 2)} on qty {quantity} | "
                 f"expiry {expiry} ({days_to_expiry(expiry)} DTE) | {instrument_name} close {round(instrument_close, 2)}")
-    record_details_in_mongo(sell_strike_symbol, sell_security_id, buy_strike_symbol, buy_security_id, "Bullish", instrument_close, expiry, short_option_cost, long_option_cost)
 
 def calculate_pnl(quantity, long_entry, long_exit, short_entry, short_exit):
     pnl = float(quantity) * ((float(short_entry) - float(short_exit)) + (float(long_exit) - float(long_entry)))
@@ -379,6 +427,11 @@ def calculate_pnl(quantity, long_entry, long_exit, short_entry, short_exit):
 
 # @retry(tries=5, delay=5, backoff=2)
 def close_active_positions(reason="unspecified"):
+    return guarded_execution(mongo_client, strategies_collection_name, safe_notify,
+                             "spread exit", _close_active_positions, reason)
+
+
+def _close_active_positions(reason="unspecified"):
     """`reason` is carried into Slack and onto the closed strategy document. Without
     it the channel shows an exit with no way to tell a channel break from an expiry
     close from a manual stop, which makes the forward test log unreadable later."""
@@ -419,7 +472,9 @@ def close_active_positions(reason="unspecified"):
         except (KeyError, TypeError, ValueError, OverflowError) as error:
             # Both exit orders filled; a fee error must never cause another buyback.
             closed_fields.update(net_pnl=None, charges=None, accounting_error=str(error))
-            strategies.update_one({'_id': strategy['_id']}, {'$set': closed_fields})
+            saved = strategies.update_one({'_id': strategy['_id']}, {'$set': closed_fields})
+            if not saved.acknowledged or saved.matched_count != 1:
+                raise RuntimeError("Closed strategy persistence not acknowledged; do not retry exit")
             safe_notify(f"Spread CLOSED but accounting failed: {error}. MANUAL REVIEW REQUIRED. Bot is stopping.")
             sys.exit(1)
         closed_fields.update({
@@ -427,7 +482,9 @@ def close_active_positions(reason="unspecified"):
             'running_pnl': pnl,
         })
         update_last_exit_time()
-        strategies.update_one({'_id': strategy['_id']}, {'$set': closed_fields})
+        saved = strategies.update_one({'_id': strategy['_id']}, {'$set': closed_fields})
+        if not saved.acknowledged or saved.matched_count != 1:
+            raise RuntimeError("Closed strategy persistence not acknowledged; do not retry exit")
         held = days_to_expiry(strategy['entry_date'])
         safe_notify(f"CLOSED {strategy['trend']} spread | gross {pnl:.2f} | "
                     f"estimated charges {charges['total']:.2f} | net {net_pnl:.2f} | "
@@ -453,6 +510,9 @@ def get_pnl(strategy, start=None):
 
 # @retry(tries=5, delay=5, backoff=2)
 def main():
+    if not check_trading_day(mongo_client, safe_notify):
+        return
+    assert_execution_clear(mongo_client, strategies_collection_name, safe_notify)
     safe_notify(f"{instrument_name} Positional bot kicked off")
     # This is the bot that actually places orders, so the IP matters most here: Dhan
     # whitelists exactly one static IP and rejects orders from anywhere else. Reporting

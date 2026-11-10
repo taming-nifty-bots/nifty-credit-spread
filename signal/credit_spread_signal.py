@@ -3,6 +3,7 @@ import os
 from tamingnifty import connect_dhan as edge
 from tamingnifty import utils as util
 from tamingnifty import ta
+from tamingnifty.safety import check_trading_day
 from datetime import datetime, timedelta
 from dateutil import parser
 import pandas as pd
@@ -86,6 +87,8 @@ def safe_notify(message):
 
 #@retry(tries=5, delay=5, backoff=2)
 def main():
+    if not check_trading_day(mongo_client, safe_notify):
+        return
     print("Supertrend Started")
     safe_notify("Nifty Supertrend bot has started!")
     # Dhan whitelists exactly one static IP for order placement and it is locked for 7

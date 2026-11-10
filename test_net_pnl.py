@@ -27,7 +27,8 @@ def test_close_saves_gross_net_and_fills_in_one_update():
     writes = []
     collection = SimpleNamespace(
         find=lambda query: [trade],
-        update_one=lambda query, update: writes.append(update["$set"]))
+        update_one=lambda query, update: (writes.append(update["$set"]) or SimpleNamespace(
+            acknowledged=True, matched_count=1)))
     namespace = dict(
         strategies=collection, instrument_name="NIFTY",
         safe_notify=lambda message: None,
@@ -36,7 +37,9 @@ def test_close_saves_gross_net_and_fills_in_one_update():
         option_spread_charges=option_spread_charges, CHARGE_SCHEDULE=CHARGE_SCHEDULE,
         update_last_exit_time=lambda: None, days_to_expiry=lambda date: 1,
         datetime=SimpleNamespace(datetime=datetime), sys=sys)
-    load_functions({"calculate_pnl", "close_active_positions"}, namespace)
+    namespace.update(mongo_client=None, strategies_collection_name="test",
+                     guarded_execution=lambda client, scope, notify, action, function, *args: function(*args))
+    load_functions({"calculate_pnl", "close_active_positions", "_close_active_positions"}, namespace)
     namespace["close_active_positions"]("test")
     assert len(writes) == 1
     assert writes[0]["strategy_state"] == "closed"
